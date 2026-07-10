@@ -1,14 +1,18 @@
 {
 	"manifest_version": 3,
 	"name": "Nyatten",
-	"version": "0.0.3",
+	"version": "0.0.4",
 	"description": "Nyattttttttttten",
 	"permissions": [
 		"storage",
 		"cookies",
 		"declarativeNetRequestWithHostAccess"
 	],
-	"host_permissions": ["https://atten.win/*", "https://scratch.mit.edu/*"],
+	"host_permissions": [
+		"https://atten.win/*",
+		"https://*.atten.win/*",
+		"https://scratch.mit.edu/*"
+	],
 	"background": {
 		"service_worker": "background.js"
 	},
@@ -37,6 +41,13 @@
 			"js": ["turnstileBridge.js"],
 			"world": "MAIN",
 			"run_at": "document_idle"
+		},
+		{
+			"matches": ["https://turbowarp.org/*", "https://*.turbowarp.org/*"],
+			"js": ["turbowarpBridge.js"],
+			"world": "MAIN",
+			"all_frames": true,
+			"run_at": "document_start"
 		}
 	]
 }

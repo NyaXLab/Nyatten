@@ -179,14 +179,17 @@
 			window.addEventListener('nyatten:locationchange', notify);
 
 			// SPA内部のDOM更新によるルート遷移も拾うフォールバック
+			const routeRoot =
+				document.getElementById('root') ||
+				document.body ||
+				document.documentElement;
 			const fallbackObserver = new MutationObserver(
 				this.util.debounce(() => {
 					notify();
 				}, 100),
 			);
-			fallbackObserver.observe(document.documentElement, {
+			fallbackObserver.observe(routeRoot, {
 				childList: true,
-				subtree: true,
 			});
 		},
 
@@ -402,7 +405,13 @@
 	}
 
 	function filterAndSortModules(modules, query) {
-		if (!query) return modules;
+		if (!query) {
+			return [...modules].sort((a, b) => {
+				const nameA = a.name || a.id || '';
+				const nameB = b.name || b.id || '';
+				return nameA.localeCompare(nameB, 'ja');
+			});
+		}
 		const withScore = modules.map((m) => ({
 			mod: m,
 			score: scoreModule(query, m),
@@ -417,17 +426,1490 @@
 
 	/* ---------------------------------------------------------------------------
 	 * ここから下に新しいモジュールを追記していく:
-	 *
-	 * Nyatten.registerModule({
-	 *   id: 'my-feature',
-	 *   defaultConfig: { enabled: true },
-	 *   init(ctx) {
-	 *     // 初回描画時の処理
-	 *   },
-	 *   onRouteChange(ctx) {
-	 *     // ページ遷移のたびの処理(必要な機能のみ実装)
-	 *   },
-	 * });
+	 * ------------------------------------------------------------------------- */
+
+	/* ---------------------------------------------------------------------------
+	 * file-preview-plus: 各種ファイルのプレビュー制御と新規形式プレビュー
+	 * ------------------------------------------------------------------------- */
+
+	function getFilenameFromUrl(url, fallback) {
+		if (!url) return fallback || 'file';
+		try {
+			const pathname = new URL(url, window.location.origin).pathname;
+			const parts = pathname.split('/').filter(Boolean);
+			const last = parts[parts.length - 1];
+			return last ? decodeURIComponent(last) : fallback || 'file';
+		} catch (e) {
+			return fallback || 'file';
+		}
+	}
+
+	async function triggerDirectDownload(btn, url, filename) {
+		if (!btn || !url) return;
+		const originalOpacity = btn.style.opacity;
+		const originalPointerEvents = btn.style.pointerEvents;
+		btn.style.opacity = '0.5';
+		btn.style.pointerEvents = 'none';
+		try {
+			const response = await fetch(url);
+			if (!response.ok) throw new Error('Fetch failed');
+			const blob = await response.blob();
+			const blobUrl = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = blobUrl;
+			a.download = filename;
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+			URL.revokeObjectURL(blobUrl);
+		} catch (e) {
+			console.error(
+				'[file-preview-plus] Direct download failed, falling back:',
+				e,
+			);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = filename;
+			a.target = '_blank';
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+		} finally {
+			btn.style.opacity = originalOpacity;
+			btn.style.pointerEvents = originalPointerEvents;
+		}
+	}
+
+	function replaceWithUnknownCard(element, filename, mime, url) {
+		if (element.hasAttribute('data-nyatten-replaced-unknown')) return;
+		element.setAttribute('data-nyatten-preview-processed', 'true');
+		element.setAttribute('data-nyatten-replaced-unknown', 'true');
+
+		let ext = '';
+		if (mime) {
+			const mimeLower = mime.toLowerCase();
+			if (mimeLower.includes('image/png')) ext = '.png';
+			else if (
+				mimeLower.includes('image/jpeg') ||
+				mimeLower.includes('image/jpg')
+			)
+				ext = '.jpg';
+			else if (mimeLower.includes('image/gif')) ext = '.gif';
+			else if (mimeLower.includes('image/svg')) ext = '.svg';
+			else if (mimeLower.includes('video/mp4')) ext = '.mp4';
+			else if (mimeLower.includes('video/webm')) ext = '.webm';
+			else if (
+				mimeLower.includes('audio/mpeg') ||
+				mimeLower.includes('audio/mp3')
+			)
+				ext = '.mp3';
+			else if (mimeLower.includes('audio/wav')) ext = '.wav';
+			else if (mimeLower.includes('audio/ogg')) ext = '.ogg';
+			else if (mimeLower.includes('text/plain')) ext = '.txt';
+			else if (mimeLower.includes('text/html')) ext = '.html';
+			else if (mimeLower.includes('text/css')) ext = '.css';
+			else if (
+				mimeLower.includes('javascript') ||
+				mimeLower.includes('application/x-javascript') ||
+				mimeLower.includes('application/javascript')
+			)
+				ext = '.js';
+			else if (mimeLower.includes('markdown')) ext = '.md';
+			else if (mimeLower.includes('zip')) ext = '.zip';
+		}
+
+		let downloadFilename = filename;
+		if (ext && !filename.toLowerCase().endsWith(ext)) {
+			downloadFilename = filename + ext;
+		}
+
+		const wrapper = document.createElement('div');
+		wrapper.className =
+			'flex items-center gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2.5 w-full';
+		wrapper.setAttribute('data-post-card-interactive', 'true');
+		wrapper.innerHTML =
+			'<div class="flex size-9 shrink-0 items-center justify-center rounded-md bg-background text-muted-foreground">' +
+			'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4">' +
+			'<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path>' +
+			'<path d="M14 2v4a2 2 0 0 0 2 2h4"></path>' +
+			'</svg>' +
+			'</div>' +
+			'<div class="min-w-0 flex-1">' +
+			'<p class="truncate text-sm font-medium text-foreground">' +
+			escHtml(downloadFilename) +
+			'</p>' +
+			'<p class="truncate text-xs text-muted-foreground">' +
+			escHtml(mime) +
+			'</p>' +
+			'</div>' +
+			'<a href="' +
+			escAttr(url) +
+			'" download="' +
+			escAttr(downloadFilename) +
+			'" target="_blank" rel="noreferrer" class="nyatten-download-btn inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 rounded-full border border-border bg-background text-foreground hover:bg-muted font-semibold whitespace-nowrap transition-colors outline-none disabled:pointer-events-none disabled:opacity-50 size-8 min-h-8 text-sm [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg]:bg-transparent [&_svg:not([class*=\'size-\'])]:size-4" data-slot="icon-button" title="ダウンロード" aria-label="ダウンロード" data-post-card-interactive="true">' +
+			'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4">' +
+			'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>' +
+			'<polyline points="7 10 12 15 17 10"></polyline>' +
+			'<line x1="12" y1="15" x2="12" y2="3"></line>' +
+			'</svg>' +
+			'</a>';
+
+		element.replaceWith(wrapper);
+
+		const downloadBtn = wrapper.querySelector('.nyatten-download-btn');
+		if (downloadBtn) {
+			downloadBtn.addEventListener('click', (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				triggerDirectDownload(downloadBtn, url, downloadFilename);
+			});
+		}
+	}
+
+	function estimateFileType(bytes, filename) {
+		if (
+			bytes.length >= 4 &&
+			bytes[0] === 0x50 &&
+			bytes[1] === 0x4b &&
+			bytes[2] === 0x03 &&
+			bytes[3] === 0x04
+		) {
+			try {
+				const textDecoder = new TextDecoder('utf-8');
+				const str = textDecoder.decode(bytes.slice(0, 1000));
+				if (str.includes('project.json')) {
+					return 'sb3';
+				}
+			} catch (e) {}
+			return 'zip';
+		}
+
+		let str = '';
+		try {
+			const textDecoder = new TextDecoder('utf-8');
+			str = textDecoder.decode(bytes);
+		} catch (e) {
+			return 'binary';
+		}
+
+		const cleanStr = str.trim();
+
+		if (cleanStr.includes('<svg') || cleanStr.includes('<SVG')) {
+			return 'svg';
+		}
+
+		if (
+			cleanStr.includes('<!DOCTYPE html') ||
+			cleanStr.includes('<!doctype html') ||
+			cleanStr.includes('<html') ||
+			cleanStr.includes('<HTML') ||
+			cleanStr.includes('<body') ||
+			cleanStr.includes('<BODY')
+		) {
+			return 'html';
+		}
+
+		if (
+			cleanStr.includes('{') &&
+			cleanStr.includes('}') &&
+			(/[\w-]+\s*:\s*[^;]+;/g.test(cleanStr) ||
+				cleanStr.includes('@media') ||
+				cleanStr.includes('@import')) &&
+			!cleanStr.includes('function') &&
+			!cleanStr.includes('const ') &&
+			!cleanStr.includes('let ')
+		) {
+			return 'css';
+		}
+
+		const jsKeywords =
+			/\b(const|let|var|function|import|export|class|console|return|typeof|instanceof|window|document)\b|=>/g;
+		if (jsKeywords.test(cleanStr)) {
+			return 'js';
+		}
+
+		const mdKeywords = /^(#+\s|\-\s|\*\s|>\s|\[.*\]\(.*\)|`{3})/m;
+		if (mdKeywords.test(cleanStr)) {
+			return 'md';
+		}
+
+		let nonPrintable = 0;
+		const len = Math.min(bytes.length, 100);
+		for (let i = 0; i < len; i++) {
+			if (bytes[i] < 9 || (bytes[i] > 13 && bytes[i] < 32)) {
+				nonPrintable++;
+			}
+		}
+		if (nonPrintable > 5) {
+			return 'binary';
+		}
+
+		return 'text';
+	}
+
+	function highlightCode(code, language) {
+		let html = escHtml(code);
+		if (language === 'js') {
+			html = html
+				.replace(
+					/\b(const|let|var|function|class|extends|new|return|import|export|from|default|if|else|for|while|switch|case|try|catch|finally|throw|async|await|typeof|instanceof)\b/g,
+					'<span style="color: #ff7b72; font-weight: bold;">$1</span>',
+				)
+				.replace(
+					/\b(true|false|null|undefined|NaN)\b/g,
+					'<span style="color: #79c0ff;">$1</span>',
+				)
+				.replace(
+					/("[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'|`[^`\\]*(?:\\.[^`\\]*)*`)/g,
+					'<span style="color: #a5d6ff;">$1</span>',
+				)
+				.replace(
+					/(\/\/.*|\/\*[\s\S]*?\*\/)/g,
+					'<span style="color: #8b949e; font-style: italic;">$1</span>',
+				)
+				.replace(
+					/\b(\d+)\b/g,
+					'<span style="color: #d2a8ff;">$1</span>',
+				);
+		} else if (language === 'css') {
+			html = html
+				.replace(
+					/([^{]+)\s*\{/g,
+					'<span style="color: #79c0ff; font-weight: bold;">$1</span> {',
+				)
+				.replace(
+					/([\w-]+)\s*:/g,
+					'<span style="color: #7ee787;">$1</span>:',
+				)
+				.replace(
+					/:([^;}]+)/g,
+					(m, p1) => `: <span style="color: #a5d6ff;">${p1}</span>`,
+				)
+				.replace(
+					/(\/\*[\s\S]*?\*\/)/g,
+					'<span style="color: #8b949e; font-style: italic;">$1</span>',
+				);
+		} else if (
+			language === 'html' ||
+			language === 'xml' ||
+			language === 'svg'
+		) {
+			html = html
+				.replace(
+					/(&lt;\/?[a-zA-Z0-9:-]+)(\s|&gt;)/g,
+					'<span style="color: #7ee787;">$1</span>$2',
+				)
+				.replace(
+					/(\s[a-zA-Z0-9:-]+=)(["\'][^"\']*["\'])/g,
+					'$1<span style="color: #a5d6ff;">$2</span>',
+				)
+				.replace(
+					/(&lt;!--[\s\S]*?--&gt;)/g,
+					'<span style="color: #8b949e; font-style: italic;">$1</span>',
+				);
+		} else if (language === 'md') {
+			html = html
+				.replace(
+					/^(#+\s+.*)$/gm,
+					'<span style="color: #1f6feb; font-weight: bold;">$1</span>',
+				)
+				.replace(
+					/(\*\*.*?\*\*)/g,
+					'<span style="color: #ff7b72; font-weight: bold;">$1</span>',
+				)
+				.replace(
+					/(\*.*?\*)/g,
+					'<span style="color: #ff7b72; font-style: italic;">$1</span>',
+				)
+				.replace(
+					/(`.*?`)/g,
+					'<span style="color: #a5d6ff; background: rgba(110,118,129,0.4); padding: 2px 4px; border-radius: 4px;">$1</span>',
+				)
+				.replace(
+					/(\[.*?\]\(.*?\))/g,
+					'<span style="color: #58a6ff;">$1</span>',
+				);
+		}
+		return html;
+	}
+
+	function renderCodeBlock(code, language) {
+		const highlighted = highlightCode(code, language);
+		const lines = highlighted.split('\n');
+
+		const rowsHtml = lines
+			.map(
+				(line, i) =>
+					'<tr>' +
+					'<td class="nyatten-line-number">' +
+					(i + 1) +
+					'</td>' +
+					'<td class="nyatten-code-line">' +
+					(line || ' ') +
+					'</td>' +
+					'</tr>',
+			)
+			.join('');
+
+		return (
+			'<div class="nyatten-code-container font-mono text-sm border border-border rounded-xl bg-muted/20">' +
+			'<table class="nyatten-code-table">' +
+			'<tbody>' +
+			rowsHtml +
+			'</tbody>' +
+			'</table>' +
+			'</div>'
+		);
+	}
+
+	function parseMarkdown(md) {
+		let html = escHtml(md);
+
+		html = html.replace(
+			/^######\s+(.*)$/gm,
+			'<h6 class="text-xs font-bold mt-2 mb-1">$1</h6>',
+		);
+		html = html.replace(
+			/^#####\s+(.*)$/gm,
+			'<h5 class="text-sm font-bold mt-3 mb-1">$1</h5>',
+		);
+		html = html.replace(
+			/^####\s+(.*)$/gm,
+			'<h4 class="text-base font-bold mt-3 mb-1">$1</h4>',
+		);
+		html = html.replace(
+			/^###\s+(.*)$/gm,
+			'<h3 class="text-lg font-bold mt-4 mb-2">$1</h3>',
+		);
+		html = html.replace(
+			/^##\s+(.*)$/gm,
+			'<h2 class="text-xl font-bold mt-4 mb-2 border-b border-border pb-1">$1</h2>',
+		);
+		html = html.replace(
+			/^#\s+(.*)$/gm,
+			'<h1 class="text-2xl font-extrabold mt-5 mb-3 border-b border-border pb-1">$1</h1>',
+		);
+
+		html = html.replace(
+			/\*\*\*(.*?)\*\*\*/g,
+			'<strong><em>$1</em></strong>',
+		);
+		html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+		html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+		html = html.replace(/___(.*?)___/g, '<strong><em>$1</em></strong>');
+		html = html.replace(/__(.*?)__/g, '<strong>$1</strong>');
+		html = html.replace(/_(.*?)_/g, '<em>$1</em>');
+
+		html = html.replace(/~~(.*?)~~/g, '<del>$1</del>');
+
+		html = html.replace(
+			/```([\s\S]*?)```/g,
+			'<pre class="bg-muted/50 p-3 rounded-lg font-mono text-sm overflow-x-auto my-2">$1</pre>',
+		);
+		html = html.replace(
+			/`(.*?)`/g,
+			'<code class="bg-muted/50 px-1.5 py-0.5 rounded font-mono text-sm">$1</code>',
+		);
+		html = html.replace(/\[(.*?)\]\((.*?)\)/g, (match, text, url) => {
+			const trimmedUrl = url.trim();
+			const lowercaseUrl = trimmedUrl.toLowerCase();
+			const isDangerous =
+				lowercaseUrl.startsWith('javascript:') ||
+				lowercaseUrl.startsWith('data:') ||
+				lowercaseUrl.startsWith('vbscript:');
+			if (isDangerous) {
+				return `<a href="#" target="_blank" class="text-link hover:underline">${text}</a>`;
+			}
+			const safeUrl = trimmedUrl.replace(/"/g, '&quot;');
+			return `<a href="${safeUrl}" target="_blank" class="text-link hover:underline">${text}</a>`;
+		});
+		html = html.replace(
+			/^&gt;\s+(.*)$/gm,
+			'<blockquote class="border-l-4 border-muted px-4 py-2 italic my-2 bg-muted/10">$1</blockquote>',
+		);
+
+		html = html.replace(
+			/^\s*-\s+(.*)$/gm,
+			'<li class="list-disc ml-6">$1</li>',
+		);
+		html = html.replace(
+			/^\s*\*\s+(.*)$/gm,
+			'<li class="list-disc ml-6">$1</li>',
+		);
+		html = html.replace(
+			/^\s*\d+\.\s+(.*)$/gm,
+			'<li class="list-decimal ml-6">$1</li>',
+		);
+
+		const blocks = html.split(/\n{2,}/);
+		html = blocks
+			.map((block) => {
+				if (
+					block.trim().startsWith('<h') ||
+					block.trim().startsWith('<li') ||
+					block.trim().startsWith('<blockquote') ||
+					block.trim().startsWith('<pre')
+				) {
+					return block;
+				}
+				return (
+					'<p class="my-2 leading-relaxed">' +
+					block.replace(/\n/g, '<br>') +
+					'</p>'
+				);
+			})
+			.join('');
+
+		return (
+			'<div class="nyatten-markdown-preview prose dark:prose-invert max-h-96 overflow-y-auto p-4 border border-border rounded-xl bg-card text-foreground text-sm">' +
+			html +
+			'</div>'
+		);
+	}
+
+	async function openEnlargedModal(
+		format,
+		filename,
+		url,
+		content,
+		totalSize,
+	) {
+		const ext = '.' + format.toLowerCase();
+		let downloadFilename = filename;
+		if (!filename.toLowerCase().endsWith(ext)) {
+			downloadFilename = filename + ext;
+		}
+
+		const backdrop = document.createElement('div');
+		backdrop.className =
+			'nyatten-modal-backdrop fixed inset-0 z-[9999] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in';
+
+		const modal = document.createElement('div');
+		modal.className =
+			'bg-background text-foreground rounded-2xl border border-border w-full max-w-5xl h-[85vh] flex flex-col overflow-hidden shadow-2xl animate-scale-up';
+		modal.style.transformOrigin = 'center';
+
+		let bodyHtml = '';
+		let localBlobUrls = [];
+		let loadedContent = content;
+
+		if (loadedContent === null && format !== 'sb3') {
+			try {
+				const response = await fetch(url);
+				if (response.ok) {
+					const buf = await response.arrayBuffer();
+					const bytesData = new Uint8Array(buf);
+					const size = buf.byteLength;
+					if (size > 512 * 1024) {
+						const truncatedBytes = bytesData.slice(0, 512 * 1024);
+						const decoder = new TextDecoder('utf-8');
+						loadedContent = decoder.decode(truncatedBytes) + '\n\n... (ファイルサイズが大きいため、プレビューは省略されました。全体を表示するにはダウンロードしてください)';
+					} else {
+						const decoder = new TextDecoder('utf-8');
+						loadedContent = decoder.decode(bytesData);
+					}
+				} else {
+					loadedContent = '読み込みに失敗しました。';
+				}
+			} catch (e) {
+				loadedContent = '読み込みに失敗しました。';
+			}
+		}
+
+		if (format === 'sb3') {
+			let username = '';
+			try {
+				const res = await chrome.runtime.sendMessage({
+					type: 'nyatten:get-scratch-session',
+				});
+				if (res && res.ok && res.username) {
+					username = res.username;
+				}
+			} catch (err) {}
+
+			const params = new URLSearchParams({
+				project_url: url,
+				autoplay: 'true',
+			});
+			if (username) {
+				params.set('username', username);
+			}
+
+			bodyHtml =
+				'<iframe src="https://turbowarp.org/embed?' +
+				params.toString().replace('autoplay=true', 'autoplay') +
+				'" class="w-full h-full border-0 bg-background" scrolling="no" allowfullscreen></iframe>';
+		} else if (format === 'html') {
+			const blob = new Blob([loadedContent], { type: 'text/html' });
+			const blobUrl = URL.createObjectURL(blob);
+			localBlobUrls.push(blobUrl);
+			bodyHtml =
+				'<iframe sandbox="allow-scripts" src="' +
+				blobUrl +
+				'" class="w-full h-full border-0 bg-white"></iframe>';
+		} else if (format === 'svg') {
+			const blob = new Blob([loadedContent], { type: 'image/svg+xml' });
+			const blobUrl = URL.createObjectURL(blob);
+			localBlobUrls.push(blobUrl);
+			bodyHtml =
+				'<div class="w-full h-full flex items-center justify-center p-8 bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] dark:bg-[radial-gradient(#1f2937_1px,transparent_1px)] bg-[size:20px_20px]">' +
+				'<img src="' +
+				blobUrl +
+				'" class="max-w-full max-h-full object-contain" />' +
+				'</div>';
+		} else if (format === 'md') {
+			bodyHtml =
+				'<div class="w-full h-full overflow-y-auto p-8 prose dark:prose-invert text-foreground text-sm bg-card">' +
+				parseMarkdown(loadedContent || '') +
+				'</div>';
+		} else if (format === 'js' || format === 'css') {
+			bodyHtml =
+				'<div class="w-full h-full overflow-y-auto p-4 bg-muted/10">' +
+				renderCodeBlock(loadedContent || '', format) +
+				'</div>';
+		}
+
+		modal.innerHTML =
+			'<div class="flex items-center justify-between border-b border-border p-4 bg-muted/10 shrink-0">' +
+			'<div class="flex items-center gap-2 min-w-0">' +
+			'<div class="min-w-0">' +
+			'<p class="truncate text-sm font-bold text-foreground" title="' +
+			escAttr(downloadFilename) +
+			'">' +
+			escHtml(downloadFilename) +
+			'</p>' +
+			'<p class="text-xs text-muted-foreground uppercase font-mono">' +
+			format +
+			'</p>' +
+			'</div>' +
+			'</div>' +
+			'<button type="button" class="nyatten-modal-close p-2 rounded-full hover:bg-muted text-muted-foreground hover:text-foreground transition-colors outline-none">' +
+			'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4">' +
+			'<line x1="18" y1="6" x2="6" y2="18"></line>' +
+			'<line x1="6" y1="6" x2="18" y2="18"></line>' +
+			'</svg>' +
+			'</button>' +
+			'</div>' +
+			'<div class="flex-1 min-h-0 w-full overflow-hidden bg-background">' +
+			bodyHtml +
+			'</div>';
+
+		backdrop.appendChild(modal);
+		document.body.appendChild(backdrop);
+
+		// Disable body scroll
+		const originalBodyOverflow = document.body.style.overflow;
+		document.body.style.overflow = 'hidden';
+
+		const closeModal = () => {
+			localBlobUrls.forEach((bUrl) => URL.revokeObjectURL(bUrl));
+			document.body.style.overflow = originalBodyOverflow;
+			backdrop.remove();
+			document.removeEventListener('keydown', handleEsc);
+		};
+
+		const handleEsc = (e) => {
+			if (e.key === 'Escape') closeModal();
+		};
+
+		document.addEventListener('keydown', handleEsc);
+
+		backdrop.addEventListener('click', (e) => {
+			if (e.target === backdrop) closeModal();
+		});
+
+		modal
+			.querySelector('.nyatten-modal-close')
+			.addEventListener('click', closeModal);
+	}
+
+	function renderCustomPreviewCard(
+		card,
+		format,
+		filename,
+		url,
+		content,
+		arrayBuffer,
+		totalSize,
+	) {
+		card.setAttribute('data-nyatten-preview-processed', 'true');
+		card.setAttribute('data-nyatten-custom-preview', format);
+
+		const ext = '.' + format.toLowerCase();
+		let downloadFilename = filename;
+		if (!filename.toLowerCase().endsWith(ext)) {
+			downloadFilename = filename + ext;
+		}
+
+		const wrapper = document.createElement('div');
+		wrapper.className =
+			'nyatten-custom-preview-card rounded-2xl border border-border bg-card p-4 space-y-3 w-full';
+		wrapper.setAttribute('data-post-card-interactive', 'true');
+
+		let tabs = [];
+		let activeTab = '';
+		if (format === 'svg' || format === 'md') {
+			tabs = ['プレビュー', 'ソースコード'];
+			activeTab = 'プレビュー';
+		} else if (format === 'html') {
+			tabs = ['ソースコード', 'プレビュー'];
+			activeTab = 'ソースコード';
+		} else if (format === 'sb3') {
+			tabs = ['プレイヤー', 'ファイル詳細'];
+			activeTab = 'プレイヤー';
+		}
+
+		const tabsHtml = tabs
+			.map(
+				(tab) =>
+					'<button type="button" class="nyatten-tab-btn px-3 py-1 text-xs font-semibold rounded-lg transition-colors ' +
+					(tab === activeTab
+						? 'bg-muted text-foreground'
+						: 'text-muted-foreground hover:text-foreground') +
+					'" data-tab="' +
+					tab +
+					'">' +
+					tab +
+					'</button>',
+			)
+			.join('');
+
+		const fileIcon =
+			'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4 text-muted-foreground">' +
+			'<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path>' +
+			'<path d="M14 2v4a2 2 0 0 0 2 2h4"></path>' +
+			'</svg>';
+
+		const headerHtml =
+			'<div class="flex items-center justify-between gap-3 pb-2 border-b border-border">' +
+			'<div class="flex items-center gap-2 min-w-0">' +
+			fileIcon +
+			'<div class="min-w-0">' +
+			'<p class="truncate text-sm font-semibold text-foreground" title="' +
+			escAttr(downloadFilename) +
+			'">' +
+			escHtml(downloadFilename) +
+			'</p>' +
+			'<p class="text-xs text-muted-foreground uppercase font-mono">' +
+			format +
+			'</p>' +
+			'</div>' +
+			'</div>' +
+			'<div class="flex items-center gap-2">' +
+			(tabs.length > 0
+				? '<div class="flex bg-muted/40 p-0.5 rounded-xl border border-border/50">' +
+					tabsHtml +
+					'</div>'
+				: '') +
+			'<a href="' +
+			escAttr(url) +
+			'" download="' +
+			escAttr(downloadFilename) +
+			'" target="_blank" rel="noreferrer" class="nyatten-download-btn inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 rounded-full border border-border bg-background text-foreground hover:bg-muted font-semibold whitespace-nowrap transition-colors outline-none disabled:pointer-events-none disabled:opacity-50 size-8 min-h-8 text-sm [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg]:bg-transparent [&_svg:not([class*=\'size-\'])]:size-4" data-slot="icon-button" title="ダウンロード" aria-label="ダウンロード">' +
+			'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4">' +
+			'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>' +
+			'<polyline points="7 10 12 15 17 10"></polyline>' +
+			'<line x1="12" y1="15" x2="12" y2="3"></line>' +
+			'</svg>' +
+			'</a>' +
+			'</div>' +
+			'</div>';
+
+		const bodyHtml =
+			'<div class="nyatten-preview-body min-h-24 w-full"></div>';
+
+		wrapper.innerHTML = headerHtml + bodyHtml;
+		card.replaceWith(wrapper);
+
+		const previewBody = wrapper.querySelector('.nyatten-preview-body');
+
+		let blobUrls = [];
+		const cleanUpBlobUrls = () => {
+			blobUrls.forEach((bUrl) => URL.revokeObjectURL(bUrl));
+			blobUrls = [];
+		};
+
+		const renderTabContent = (tab) => {
+			cleanUpBlobUrls();
+			if (content === null && format !== 'sb3') {
+				const sizeStr = totalSize ? (totalSize / 1024).toFixed(1) + ' KB' : '不明';
+				previewBody.innerHTML =
+					'<div class="flex flex-col items-center justify-center p-6 border border-border rounded-xl bg-muted/10 w-full min-h-[120px] gap-2">' +
+					'<p class="text-xs text-muted-foreground">ファイルサイズが大きいため、自動プレビューは無効化されています (サイズ: ' + sizeStr + ')</p>' +
+					'<button type="button" class="nyatten-load-preview-btn px-4 py-2 text-xs font-semibold rounded-xl bg-primary text-primary-foreground hover:bg-primary/90 transition-colors">' +
+					'プレビューを表示' +
+					'</button>' +
+					'</div>';
+
+				const loadBtn = previewBody.querySelector('.nyatten-load-preview-btn');
+				loadBtn.addEventListener('click', async (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+
+					loadBtn.disabled = true;
+					loadBtn.textContent = '読み込み中...';
+
+					try {
+						const response = await fetch(url);
+						if (!response.ok) throw new Error('Fetch failed');
+						const buf = await response.arrayBuffer();
+						const bytesData = new Uint8Array(buf);
+						
+						arrayBuffer = buf;
+						totalSize = buf.byteLength;
+						
+						if (totalSize > 512 * 1024) {
+							const truncatedBytes = bytesData.slice(0, 512 * 1024);
+							const decoder = new TextDecoder('utf-8');
+							content = decoder.decode(truncatedBytes) + '\n\n... (ファイルサイズが大きいため、プレビューは省略されました。全体を表示するにはダウンロードしてください)';
+						} else {
+							const decoder = new TextDecoder('utf-8');
+							content = decoder.decode(bytesData);
+						}
+						
+						renderTabContent(activeTab || 'ソースコード');
+					} catch (err) {
+						console.error(err);
+						loadBtn.disabled = false;
+						loadBtn.textContent = '読み込み失敗 (再試行)';
+					}
+				});
+				return;
+			}
+
+			if (tab === 'ソースコード' || tabs.length === 0) {
+				previewBody.innerHTML = renderCodeBlock(content || '', format);
+			} else if (tab === 'プレビュー') {
+				if (format === 'svg') {
+					const blob = new Blob([content], { type: 'image/svg+xml' });
+					const blobUrl = URL.createObjectURL(blob);
+					blobUrls.push(blobUrl);
+					previewBody.innerHTML =
+						'<div class="flex items-center justify-center p-6 border border-border rounded-xl bg-muted/10 bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] dark:bg-[radial-gradient(#1f2937_1px,transparent_1px)] bg-[size:16px_16px] w-full min-h-[120px]">' +
+						'<img src="' +
+						blobUrl +
+						'" class="max-w-full h-auto max-h-[480px] object-contain" />' +
+						'</div>';
+				} else if (format === 'md') {
+					previewBody.innerHTML = parseMarkdown(content || '');
+				} else if (format === 'html') {
+					const blob = new Blob([content], { type: 'text/html' });
+					const blobUrl = URL.createObjectURL(blob);
+					blobUrls.push(blobUrl);
+					previewBody.innerHTML =
+						'<iframe sandbox="allow-scripts" src="' +
+						blobUrl +
+						'" class="w-full border border-border rounded-xl bg-white" style="height: 320px;"></iframe>';
+				}
+			} else if (tab === 'プレイヤー') {
+				if (format === 'sb3') {
+					previewBody.innerHTML =
+						'<div class="flex justify-center w-full nyatten-sb3-container" style="height: 412px;">' +
+						'<div class="nyatten-sb3-placeholder relative flex flex-col items-center justify-center border border-border rounded-xl bg-muted/10 overflow-hidden w-full cursor-pointer group select-none h-full" style="background: linear-gradient(135deg, var(--card, #fff) 0%, rgba(59, 130, 246, 0.03) 100%);">' +
+						'<div class="absolute inset-0 bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] dark:bg-[radial-gradient(#1f2937_1px,transparent_1px)] bg-[size:20px_20px] opacity-40"></div>' +
+						'<div class="relative flex flex-col items-center gap-4 z-10 transition-transform duration-300 group-hover:scale-105">' +
+						'<div class="flex items-center justify-center w-20 h-20 rounded-full bg-primary/10 border border-primary/20 text-primary transition-all duration-300 group-hover:bg-primary group-hover:text-primary-foreground group-hover:shadow-[0_0_20px_rgba(59,130,246,0.4)]">' +
+						'<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="currentColor" class="translate-x-0.5">' +
+						'<path d="M8 5v14l11-7z"/>' +
+						'</svg>' +
+						'</div>' +
+						'</div>' +
+						'</div>' +
+						'</div>';
+
+					const container = previewBody.querySelector(
+						'.nyatten-sb3-container',
+					);
+					const placeholder = container.querySelector(
+						'.nyatten-sb3-placeholder',
+					);
+					placeholder.addEventListener('click', async (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+
+						let username = '';
+						try {
+							const res = await chrome.runtime.sendMessage({
+								type: 'nyatten:get-scratch-session',
+							});
+							if (res && res.ok && res.username) {
+								username = res.username;
+							}
+						} catch (err) {}
+
+						const params = new URLSearchParams({
+							project_url: url,
+							autoplay: 'true',
+						});
+						if (username) {
+							params.set('username', username);
+						}
+
+						container.innerHTML =
+							'<iframe src="https://turbowarp.org/embed?' +
+							params
+								.toString()
+								.replace('autoplay=true', 'autoplay') +
+							'" class="w-full border border-border rounded-xl bg-background h-full" scrolling="no" allowfullscreen></iframe>';
+					});
+				}
+			} else if (tab === 'ファイル詳細') {
+				const size =
+					totalSize !== null && totalSize !== undefined
+						? totalSize
+						: arrayBuffer
+							? arrayBuffer.byteLength
+							: null;
+				const sizeStr =
+					size !== null ? (size / 1024).toFixed(1) + ' KB' : '不明';
+				previewBody.innerHTML =
+					'<div class="p-4 border border-border rounded-xl bg-muted/10 space-y-2 text-sm text-foreground">' +
+					'<p><strong>ファイル名:</strong> ' +
+					escHtml(downloadFilename) +
+					'</p>' +
+					'<p><strong>ファイル形式:</strong> Scratch 3.0 プロジェクト (.sb3)</p>' +
+					'<p><strong>ファイルサイズ:</strong> ' +
+					sizeStr +
+					'</p>' +
+					'<p><strong>URL:</strong> <a href="' +
+					escAttr(url) +
+					'" target="_blank" class="text-link hover:underline break-all">' +
+					escHtml(url) +
+					'</a></p>' +
+					'</div>';
+			}
+		};
+
+		renderTabContent(activeTab || 'ソースコード');
+
+		const tabButtons = wrapper.querySelectorAll('.nyatten-tab-btn');
+		tabButtons.forEach((btn) => {
+			btn.addEventListener('click', (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				const targetTab = btn.getAttribute('data-tab');
+
+				tabButtons.forEach((b) => {
+					b.className =
+						'nyatten-tab-btn px-3 py-1 text-xs font-semibold rounded-lg transition-colors ' +
+						(b.getAttribute('data-tab') === targetTab
+							? 'bg-muted text-foreground'
+							: 'text-muted-foreground hover:text-foreground');
+				});
+
+				renderTabContent(targetTab);
+			});
+		});
+
+		const downloadBtn = wrapper.querySelector('.nyatten-download-btn');
+		if (downloadBtn) {
+			downloadBtn.addEventListener('click', (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				triggerDirectDownload(downloadBtn, url, downloadFilename);
+			});
+		}
+
+		wrapper.addEventListener('click', async (e) => {
+			// Exclude interactive elements inside the card
+			if (
+				e.target.closest(
+					'button, a, iframe, input, select, textarea, .nyatten-tab-btn, .nyatten-code-container, .nyatten-markdown-preview',
+				)
+			) {
+				return;
+			}
+			await openEnlargedModal(format, filename, url, content, totalSize);
+		});
+	}
+
+	async function processCard(card, ctx) {
+		if (card.hasAttribute('data-nyatten-preview-processed')) return;
+		card.setAttribute('data-nyatten-preview-processed', 'true');
+
+		const downloadLink = card.querySelector('a[download]');
+		if (!downloadLink) return;
+
+		const url = downloadLink.href;
+		if (!url) return;
+
+		const originalFilename =
+			downloadLink.getAttribute('download') ||
+			card.querySelector('p.text-sm')?.textContent ||
+			'';
+
+		try {
+			// Estimate format from file extension first to avoid unnecessary range requests
+			let format = '';
+			const extMatch = originalFilename.match(/\.([a-zA-Z0-9]+)$/);
+			if (extMatch) {
+				const ext = extMatch[1].toLowerCase();
+				if (ext === 'svg') format = 'svg';
+				else if (ext === 'md' || ext === 'markdown') format = 'md';
+				else if (ext === 'html' || ext === 'htm') format = 'html';
+				else if (ext === 'js' || ext === 'mjs' || ext === 'cjs')
+					format = 'js';
+				else if (ext === 'css') format = 'css';
+				else if (ext === 'sb3') format = 'sb3';
+			}
+
+			const config = ctx.getConfig();
+			const customFormats = ['svg', 'md', 'html', 'js', 'css', 'sb3'];
+
+			let buffer = null;
+			let bytes = null;
+			let totalSize = null;
+			let fullContent = '';
+
+			if (format && customFormats.includes(format)) {
+				// If the estimated format is disabled in settings, return immediately
+				if (config[format] === false) return;
+
+				if (format === 'sb3') {
+					// For sb3, we don't need the full content, so range request is optimal
+					const partialResponse = await fetch(url, {
+						headers: { Range: 'bytes=0-4095' },
+					});
+					if (!partialResponse.ok && partialResponse.status !== 206)
+						return;
+
+					// Extract total size from headers
+					const contentRange =
+						partialResponse.headers.get('Content-Range');
+					if (contentRange) {
+						const match = contentRange.match(/\/(\d+)$/);
+						if (match) {
+							totalSize = parseInt(match[1], 10);
+						}
+					}
+					if (!totalSize) {
+						const contentLength =
+							partialResponse.headers.get('Content-Length');
+						if (contentLength && partialResponse.status === 200) {
+							totalSize = parseInt(contentLength, 10);
+						}
+					}
+				} else {
+					// For SVG/Markdown/code previews, fetch the full content directly
+					const response = await fetch(url);
+					if (!response.ok) return;
+
+					const contentLength = response.headers.get('Content-Length');
+					let size = 0;
+					if (contentLength) {
+						size = parseInt(contentLength, 10);
+					}
+
+					if (size > 1024 * 1024) {
+						totalSize = size;
+						fullContent = null;
+						buffer = null;
+					} else {
+						buffer = await response.arrayBuffer();
+						bytes = new Uint8Array(buffer);
+						totalSize = buffer.byteLength;
+
+						if (totalSize > 1024 * 1024) {
+							fullContent = null;
+						} else if (totalSize > 128 * 1024) {
+							const truncatedBytes = bytes.slice(0, 128 * 1024);
+							const decoder = new TextDecoder('utf-8');
+							fullContent = decoder.decode(truncatedBytes) + '\n\n... (ファイルサイズが大きいため、プレビューは省略されました。全体を表示するにはダウンロードしてください)';
+						} else {
+							const decoder = new TextDecoder('utf-8');
+							fullContent = decoder.decode(bytes);
+						}
+					}
+				}
+			} else {
+				// Fallback: fetch the first 4KB to estimate file type
+				const partialResponse = await fetch(url, {
+					headers: { Range: 'bytes=0-4095' },
+				});
+				if (!partialResponse.ok && partialResponse.status !== 206)
+					return;
+
+				const partialBuffer = await partialResponse.arrayBuffer();
+				const partialBytes = new Uint8Array(partialBuffer);
+				if (partialBytes.length === 0) return;
+
+				format = estimateFileType(partialBytes, originalFilename);
+				if (!customFormats.includes(format)) return;
+				if (config[format] === false) return;
+
+				// Extract total size from headers
+				const contentRange =
+					partialResponse.headers.get('Content-Range');
+				if (contentRange) {
+					const match = contentRange.match(/\/(\d+)$/);
+					if (match) {
+						totalSize = parseInt(match[1], 10);
+					}
+				}
+				if (!totalSize) {
+					const contentLength =
+						partialResponse.headers.get('Content-Length');
+					if (contentLength && partialResponse.status === 200) {
+						totalSize = parseInt(contentLength, 10);
+					}
+				}
+
+				if (partialResponse.status === 200) {
+					buffer = partialBuffer;
+					bytes = partialBytes;
+					if (!totalSize) {
+						totalSize = buffer.byteLength;
+					}
+					if (totalSize > 1024 * 1024) {
+						fullContent = null;
+					}
+				} else {
+					if (format === 'sb3') {
+						buffer = null;
+						bytes = null;
+					} else {
+						if (totalSize > 1024 * 1024) {
+							fullContent = null;
+							buffer = null;
+						} else {
+							const fullResponse = await fetch(url);
+							if (!fullResponse.ok) return;
+
+							const contentLength = fullResponse.headers.get('Content-Length');
+							let size = 0;
+							if (contentLength) {
+								size = parseInt(contentLength, 10);
+							}
+
+							if (size > 1024 * 1024) {
+								totalSize = size;
+								fullContent = null;
+								buffer = null;
+							} else {
+								buffer = await fullResponse.arrayBuffer();
+								bytes = new Uint8Array(buffer);
+								if (!totalSize) {
+									totalSize = buffer.byteLength;
+								}
+								if (totalSize > 1024 * 1024) {
+									fullContent = null;
+								}
+							}
+						}
+					}
+				}
+
+				if (format !== 'sb3' && bytes && fullContent !== null) {
+					if (totalSize > 128 * 1024) {
+						const truncatedBytes = bytes.slice(0, 128 * 1024);
+						const decoder = new TextDecoder('utf-8');
+						fullContent = decoder.decode(truncatedBytes) + '\n\n... (ファイルサイズが大きいため、プレビューは省略されました。全体を表示するにはダウンロードしてください)';
+					} else {
+						const decoder = new TextDecoder('utf-8');
+						fullContent = decoder.decode(bytes);
+					}
+				}
+			}
+
+			renderCustomPreviewCard(
+				card,
+				format,
+				originalFilename,
+				url,
+				fullContent,
+				buffer,
+				totalSize,
+			);
+		} catch (e) {
+			console.error('[file-preview-plus] processCard error:', e);
+		}
+	}
+
+	function handleDisabledNativePreviews(ctx, root = document.body) {
+		if (!(root instanceof Element)) return;
+		const config = ctx.getConfig();
+		if (!config.enabled) return;
+
+		// 1. Images
+		if (config.image === false) {
+			const imageButtons = [];
+			const isImgBtn = (el) =>
+				el.matches(
+					'button.group.relative.cursor-pointer.overflow-hidden.rounded-lg.border.border-border',
+				) && el.querySelector('img[src]');
+			if (
+				isImgBtn(root) &&
+				!root.hasAttribute('data-nyatten-preview-processed')
+			) {
+				imageButtons.push(root);
+			}
+			imageButtons.push(
+				...Array.from(
+					root.querySelectorAll(
+						'button.group.relative.cursor-pointer.overflow-hidden.rounded-lg.border.border-border:has(img[src]):not([data-nyatten-preview-processed])',
+					),
+				),
+			);
+
+			for (const btn of imageButtons) {
+				const img = btn.querySelector('img');
+				const url = img.src;
+				if (!url || img.hasAttribute('data-twemoji')) continue;
+				const filename = getFilenameFromUrl(url, 'image.png');
+				replaceWithUnknownCard(btn, filename, 'image/png', url);
+			}
+		}
+
+		// 2. Videos
+		if (config.video === false) {
+			const videoContainers = [];
+			const isVideoCont = (el) =>
+				el.matches(
+					'div.relative.overflow-hidden.rounded-lg.border.border-border',
+				) &&
+				(el.querySelector('video') || el.querySelector('media-player'));
+			if (
+				isVideoCont(root) &&
+				!root.hasAttribute('data-nyatten-preview-processed')
+			) {
+				videoContainers.push(root);
+			}
+			videoContainers.push(
+				...Array.from(
+					root.querySelectorAll(
+						'div.relative.overflow-hidden.rounded-lg.border.border-border:has(video):not([data-nyatten-preview-processed]), div.relative.overflow-hidden.rounded-lg.border.border-border:has(media-player):not([data-nyatten-preview-processed])',
+					),
+				),
+			);
+
+			for (const el of videoContainers) {
+				const video =
+					el.querySelector('video') ||
+					el.querySelector('media-player');
+				const url = video
+					? video.src ||
+						(video.querySelector('source') || {}).src ||
+						''
+					: '';
+				if (!url) continue;
+				const filename = getFilenameFromUrl(url, 'video.mp4');
+				replaceWithUnknownCard(el, filename, 'video/mp4', url);
+			}
+		}
+
+		// 3. Audio
+		if (config.audio === false) {
+			const audioContainers = [];
+			const isAudioCont = (el) =>
+				el.matches(
+					'div.rounded-lg.border.border-border.bg-muted\\/30.px-3.py-2\\.5',
+				) &&
+				(el.querySelector('audio') ||
+					el.querySelector('.media-player-audio'));
+			if (
+				isAudioCont(root) &&
+				!root.hasAttribute('data-nyatten-preview-processed')
+			) {
+				audioContainers.push(root);
+			}
+			audioContainers.push(
+				...Array.from(
+					root.querySelectorAll(
+						'div.rounded-lg.border.border-border.bg-muted\\/30.px-3.py-2\\.5:has(audio):not([data-nyatten-preview-processed]), div.rounded-lg.border.border-border.bg-muted\\/30.px-3.py-2\\.5:has(.media-player-audio):not([data-nyatten-preview-processed])',
+					),
+				),
+			);
+
+			for (const el of audioContainers) {
+				const audio = el.querySelector('audio');
+				const url = audio
+					? audio.src ||
+						(audio.querySelector('source') || {}).src ||
+						''
+					: '';
+				if (!url) continue;
+				const filename = getFilenameFromUrl(url, 'audio.mp3');
+				replaceWithUnknownCard(el, filename, 'audio/mpeg', url);
+			}
+		}
+
+		// 4. Text
+		if (config.text === false) {
+			const textCards = [];
+			const isTextCard = (el) =>
+				el.matches(
+					'button.flex.w-full.cursor-pointer.items-center.gap-3.rounded-lg.border.border-border.bg-muted\\/30.px-3.py-2\\.5',
+				) && el.querySelector('a[download]');
+			if (
+				isTextCard(root) &&
+				!root.hasAttribute('data-nyatten-preview-processed')
+			) {
+				textCards.push(root);
+			}
+			textCards.push(
+				...Array.from(
+					root.querySelectorAll(
+						'button.flex.w-full.cursor-pointer.items-center.gap-3.rounded-lg.border.border-border.bg-muted\\/30.px-3.py-2\\.5:not([data-nyatten-preview-processed])',
+					),
+				),
+			);
+
+			for (const btn of textCards) {
+				const downloadLink = btn.querySelector('a[download]');
+				if (!downloadLink) continue;
+				const url = downloadLink.href;
+				const filename =
+					downloadLink.getAttribute('download') ||
+					btn.querySelector('p.text-sm')?.textContent ||
+					'text.txt';
+				const mime =
+					btn.querySelector('p.text-xs')?.textContent || 'text/plain';
+				replaceWithUnknownCard(btn, filename, mime, url);
+			}
+		}
+	}
+
+	function processNodes(root, ctx) {
+		if (!(root instanceof Element)) return;
+
+		// Fast-path: if the element is empty (no child elements) and doesn't match any target selectors,
+		// it cannot contain or be a preview card, so we skip it immediately.
+		if (
+			root.firstElementChild === null &&
+			!root.matches(
+				'div.flex.items-center.gap-3.rounded-lg.border.border-border.bg-muted\\/30.px-3.py-2\\.5,' +
+					'button.group.relative.cursor-pointer.overflow-hidden.rounded-lg.border.border-border,' +
+					'div.relative.overflow-hidden.rounded-lg.border.border-border,' +
+					'div.rounded-lg.border.border-border.bg-muted\\/30.px-3.py-2\\.5,' +
+					'button.flex.w-full.cursor-pointer.items-center.gap-3.rounded-lg.border.border-border.bg-muted\\/30.px-3.py-2\\.5',
+			)
+		) {
+			return;
+		}
+
+		handleDisabledNativePreviews(ctx, root);
+
+		const selector =
+			'div.flex.items-center.gap-3.rounded-lg.border.border-border.bg-muted\\/30.px-3.py-2\\.5';
+		const cards = [];
+		const isPreviewCard = (el) =>
+			el.matches(selector) && el.querySelector('a[download]');
+		if (
+			isPreviewCard(root) &&
+			!root.hasAttribute('data-nyatten-preview-processed')
+		) {
+			cards.push(root);
+		}
+		cards.push(
+			...Array.from(
+				root.querySelectorAll(
+					'div.flex.items-center.gap-3.rounded-lg.border.border-border.bg-muted\\/30.px-3.py-2\\.5:not([data-nyatten-preview-processed])',
+				),
+			),
+		);
+
+		for (const card of cards) {
+			processCard(card, ctx);
+		}
+	}
+
+	Nyatten.registerModule({
+		id: 'file-preview-plus',
+		name: 'ファイルプレビュー+',
+		description:
+			'各種ファイルのプレビュー表示やプレビュー機能の有効・無効化を設定できます',
+		defaultConfig: {
+			enabled: true,
+			image: true,
+			video: true,
+			audio: true,
+			text: true,
+			svg: true,
+			md: true,
+			html: true,
+			js: true,
+			css: true,
+			sb3: true,
+		},
+		init(ctx) {
+			ctx.log('ファイルプレビュー+ モジュール初期化');
+
+			Nyatten.util.addStyle(
+				'.nyatten-tab-btn:focus { outline: none; }' +
+					'.nyatten-code-container { max-height: 320px; direction: ltr; padding: 12px 0; overflow: auto; }' +
+					'.nyatten-code-table { border-collapse: collapse; width: max-content; min-width: 100%; border-spacing: 0; table-layout: auto; margin: 0; padding: 0; }' +
+					'.nyatten-line-number { position: sticky; left: 0; z-index: 10; color: var(--text-muted-foreground); text-align: right; padding: 0 12px; user-select: none; font-size: 12px; background-color: var(--muted, #f3f4f6); border-right: 1px solid var(--border, #ddd); min-width: 40px; white-space: nowrap; vertical-align: top; }' +
+					'.nyatten-code-line { padding: 0 16px; white-space: pre; font-size: 13px; font-family: monospace; vertical-align: top; text-align: left; }' +
+					'.nyatten-markdown-preview p { margin-top: 0.5rem; margin-bottom: 0.5rem; line-height: 1.5; }' +
+					'.nyatten-markdown-preview h1 { font-size: 1.5rem; font-weight: 800; margin-top: 1rem; margin-bottom: 0.5rem; border-bottom: 1px solid var(--border, #ddd); padding-bottom: 0.25rem; }' +
+					'.nyatten-markdown-preview h2 { font-size: 1.25rem; font-weight: 700; margin-top: 0.875rem; margin-bottom: 0.5rem; border-bottom: 1px solid var(--border, #ddd); padding-bottom: 0.25rem; }' +
+					'.nyatten-markdown-preview h3 { font-size: 1.125rem; font-weight: 600; margin-top: 0.75rem; margin-bottom: 0.375rem; }' +
+					'.nyatten-markdown-preview code { font-family: monospace; background-color: var(--muted, #f3f4f6); padding: 0.125rem 0.25rem; border-radius: 0.25rem; }' +
+					'.nyatten-markdown-preview pre { background-color: var(--muted, #f3f4f6); padding: 0.75rem; border-radius: 0.5rem; overflow-x: auto; }' +
+					'.nyatten-markdown-preview blockquote { border-left: 4px solid var(--border, #ddd); padding-left: 1rem; color: var(--text-muted-foreground, #888); font-style: italic; }' +
+					'.nyatten-markdown-preview ul, .nyatten-markdown-preview ol { margin-left: 1.5rem; margin-top: 0.5rem; margin-bottom: 0.5rem; }' +
+					'.nyatten-markdown-preview li { margin-top: 0.25rem; margin-bottom: 0.25rem; }' +
+					'.nyatten-custom-preview-card { cursor: pointer; }' +
+					'.nyatten-custom-preview-card button, .nyatten-custom-preview-card a, .nyatten-custom-preview-card iframe, .nyatten-custom-preview-card .nyatten-code-container, .nyatten-custom-preview-card .nyatten-markdown-preview { cursor: default; }' +
+					'@keyframes nyattenFadeIn { from { opacity: 0; } to { opacity: 1; } }' +
+					'@keyframes nyattenScaleUp { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }' +
+					'.animate-fade-in { animation: nyattenFadeIn 0.2s ease-out forwards; }' +
+					'.animate-scale-up { animation: nyattenScaleUp 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards; }',
+			);
+
+			// Handle postMessage requests from the turbowarpBridge inside the iframe
+			const handleBridgeMessage = async (event) => {
+				const origin = event.origin;
+				if (!origin) return;
+				const isTurbowarp =
+					origin === 'https://turbowarp.org' ||
+					/^https:\/\/[a-zA-Z0-9-]+\.turbowarp\.org$/.test(origin);
+				if (!isTurbowarp) return;
+
+				const msg = event.data;
+				if (msg && msg.type === 'nyatten:fetch-asset') {
+					const { requestId, url } = msg;
+					const sourceFrame = event.source;
+					if (!sourceFrame) return;
+
+					try {
+						let parsedUrl;
+						try {
+							parsedUrl = new URL(url);
+						} catch (e) {
+							throw new Error('Invalid URL format');
+						}
+
+						if (
+							parsedUrl.protocol !== 'http:' &&
+							parsedUrl.protocol !== 'https:'
+						) {
+							throw new Error('Unsupported protocol');
+						}
+
+						const isAttenDomain =
+							parsedUrl.hostname === 'atten.win' ||
+							parsedUrl.hostname.endsWith('.atten.win');
+						if (!isAttenDomain) {
+							throw new Error('Unauthorized domain');
+						}
+
+						const path = parsedUrl.pathname.toLowerCase();
+						const isSensitive =
+							path.startsWith('/api/') ||
+							path.startsWith('/oauth/') ||
+							path.startsWith('/signin') ||
+							path.startsWith('/signup') ||
+							path.startsWith('/settings') ||
+							path.startsWith('/admin') ||
+							path.includes('../');
+						if (isSensitive) {
+							throw new Error(
+								'Access to sensitive endpoint is blocked',
+							);
+						}
+
+						const res = await fetch(url);
+						if (res.ok) {
+							const mime = res.headers.get('Content-Type');
+							const buffer = await res.arrayBuffer();
+							sourceFrame.postMessage(
+								{
+									type: 'nyatten:fetch-asset-response',
+									requestId,
+									success: true,
+									data: buffer,
+									mime: mime,
+									status: res.status,
+								},
+								event.origin,
+								[buffer],
+							);
+						} else {
+							sourceFrame.postMessage(
+								{
+									type: 'nyatten:fetch-asset-response',
+									requestId,
+									success: false,
+									status: res.status,
+								},
+								event.origin,
+							);
+						}
+					} catch (err) {
+						console.error(
+							'[file-preview-plus] Bridge fetch failed:',
+							err,
+						);
+						sourceFrame.postMessage(
+							{
+								type: 'nyatten:fetch-asset-response',
+								requestId,
+								success: false,
+							},
+							event.origin,
+						);
+					}
+				}
+			};
+
+			window.addEventListener('message', handleBridgeMessage);
+
+			const config = ctx.getConfig();
+			if (config.enabled !== false) {
+				handleDisabledNativePreviews(ctx, document.body);
+
+				const cards = document.querySelectorAll(
+					'div.flex.items-center.gap-3.rounded-lg.border.border-border.bg-muted\\/30.px-3.py-2\\.5:not([data-nyatten-preview-processed])',
+				);
+				for (const card of cards) {
+					processCard(card, ctx);
+				}
+			}
+
+			// MutationObserverによる監視
+			const observer = new MutationObserver((mutations) => {
+				const conf = ctx.getConfig();
+				if (conf.enabled === false) return;
+
+				const addedElements = [];
+				for (const mutation of mutations) {
+					for (const node of mutation.addedNodes) {
+						if (node instanceof Element) {
+							addedElements.push(node);
+						}
+					}
+				}
+				if (addedElements.length === 0) return;
+				const uniqueAdded = addedElements.filter(el => {
+					return !addedElements.some(other => other !== el && other.contains(el));
+				});
+				for (const el of uniqueAdded) {
+					processNodes(el, ctx);
+				}
+			});
+			observer.observe(document.body, { childList: true, subtree: true });
+			this._observer = observer;
+		},
+		onRouteChange(ctx) {
+			const config = ctx.getConfig();
+			if (config.enabled === false) return;
+
+			setTimeout(() => {
+				handleDisabledNativePreviews(ctx, document.body);
+
+				const cards = document.querySelectorAll(
+					'div.flex.items-center.gap-3.rounded-lg.border.border-border.bg-muted\\/30.px-3.py-2\\.5:not([data-nyatten-preview-processed])',
+				);
+				for (const card of cards) {
+					processCard(card, ctx);
+				}
+			}, 200);
+		},
+	});
+
+	/* ---------------------------------------------------------------------------
+	 * ここから下に新しいモジュールを追記していく:
 	 * ------------------------------------------------------------------------- */
 
 	/* ---------------------------------------------------------------------------
@@ -495,8 +1977,25 @@
 
 			const root = document.body || document.documentElement;
 			if (root) {
-				this._observer = new MutationObserver(() => {
-					this._scheduleScan();
+				this._observer = new MutationObserver((mutations) => {
+					if (!this._ctx?.getConfig?.()?.enabled) return;
+					if (!this._words.length) return;
+
+					const addedElements = [];
+					for (const mutation of mutations) {
+						for (const node of mutation.addedNodes) {
+							if (node instanceof Element) {
+								addedElements.push(node);
+							}
+						}
+					}
+					if (addedElements.length === 0) return;
+					const uniqueAdded = addedElements.filter(el => {
+						return !addedElements.some(other => other !== el && other.contains(el));
+					});
+					for (const el of uniqueAdded) {
+						this._scan(el);
+					}
 				});
 				this._observer.observe(root, {
 					childList: true,
@@ -523,7 +2022,15 @@
 				prev.some((w, i) => w !== newWords[i]);
 
 			this._words = newWords;
-			if (changed) this._scheduleScan();
+			if (changed) {
+				const selector = this._getTargetSelector();
+				const elements = document.querySelectorAll(selector);
+				for (const el of elements) {
+					el.removeAttribute('data-nyatten-ngcat-scanned');
+					this._show(el);
+				}
+				this._scheduleScan();
+			}
 		},
 		_scheduleScan() {
 			clearTimeout(this._scanTimer);
@@ -549,20 +2056,45 @@
 			if (!el || !(el instanceof Element)) return;
 			(el.parentElement || el).style.display = 'none';
 		},
+		_show(el) {
+			if (!el || !(el instanceof Element)) return;
+			(el.parentElement || el).style.display = '';
+		},
 		_scan(root) {
 			if (!this._ctx?.getConfig?.()?.enabled) return;
 			if (!root) return;
 
 			const selector = this._getTargetSelector();
-
 			if (!this._words.length) return;
 
+			// Optimization: only select elements that haven't been scanned for NG words yet
+			const unscannedSelector = selector
+				.split(',')
+				.map((s) => `${s.trim()}:not([data-nyatten-ngcat-scanned])`)
+				.join(', ');
+
 			const targets = new Set();
-			(root.querySelectorAll(selector) || []).forEach((el) => {
+
+			// If root itself matches the selector, check it too
+			const rootSelector = selector
+				.split(',')
+				.map((s) => s.trim())
+				.join(', ');
+			if (
+				root instanceof Element &&
+				root.matches(rootSelector) &&
+				!root.hasAttribute('data-nyatten-ngcat-scanned') &&
+				!this._isSettingsElement(root)
+			) {
+				targets.add(root);
+			}
+
+			(root.querySelectorAll(unscannedSelector) || []).forEach((el) => {
 				if (!this._isSettingsElement(el)) targets.add(el);
 			});
 
 			for (const el of targets) {
+				el.setAttribute('data-nyatten-ngcat-scanned', 'true');
 				const text = el.textContent || '';
 				if (this._containsNgWord(text)) {
 					this._hide(el);
@@ -582,7 +2114,7 @@
 			this._emojiObserver = null;
 			this._emojiListUrl = 'https://ntnekochat.pages.dev/emoji/list.json';
 			this._emojiImageUrl = 'https://ntnekochat.pages.dev/emoji/';
-			this._emojiTokenRx = /_([A-Za-z0-9_-]+)_/g;
+			this._emojiRegex = null;
 			this._ignoredSelectors = [
 				'SCRIPT',
 				'STYLE',
@@ -598,11 +2130,20 @@
 
 			const observer = new MutationObserver((mutations) => {
 				if (!this._emojiIds.size) return;
+				const addedElements = [];
 				for (const mutation of mutations) {
 					for (const node of mutation.addedNodes) {
-						if (!(node instanceof Element)) continue;
-						this.processEmojiReplacements(node);
+						if (node instanceof Element) {
+							addedElements.push(node);
+						}
 					}
+				}
+				if (addedElements.length === 0) return;
+				const uniqueAdded = addedElements.filter(el => {
+					return !addedElements.some(other => other !== el && other.contains(el));
+				});
+				for (const el of uniqueAdded) {
+					this.processEmojiReplacements(el);
 				}
 			});
 			observer.observe(document.body, { childList: true, subtree: true });
@@ -641,6 +2182,23 @@
 						}
 					}
 					this._emojiIds = ids;
+
+					const sortedIds = Array.from(ids).sort(
+						(a, b) => b.length - a.length,
+					);
+					if (sortedIds.length > 0) {
+						const escapeRegExp = (string) => {
+							return string.replace(
+								/[.*+?^${}()|[\]\\]/g,
+								'\\$&',
+							);
+						};
+						const pattern = sortedIds.map(escapeRegExp).join('|');
+						this._emojiRegex = new RegExp(`_(${pattern})_`, 'g');
+					} else {
+						this._emojiRegex = null;
+					}
+
 					return ids;
 				})
 				.catch((error) => {
@@ -670,7 +2228,7 @@
 			return true;
 		},
 		processEmojiReplacements(root) {
-			if (!this._emojiIds.size || !root) return;
+			if (!this._emojiIds.size || !this._emojiRegex || !root) return;
 			const walker = document.createTreeWalker(
 				root,
 				NodeFilter.SHOW_TEXT,
@@ -695,8 +2253,8 @@
 				let lastIndex = 0;
 				const frag = document.createDocumentFragment();
 				let replaced = false;
-				this._emojiTokenRx.lastIndex = 0;
-				while ((match = this._emojiTokenRx.exec(text))) {
+				this._emojiRegex.lastIndex = 0;
+				while ((match = this._emojiRegex.exec(text))) {
 					const token = match[0];
 					const id = match[1];
 					const start = match.index;
@@ -707,12 +2265,8 @@
 							),
 						);
 					}
-					if (this._emojiIds.has(id)) {
-						frag.appendChild(this.buildEmojiImage(id));
-						replaced = true;
-					} else {
-						frag.appendChild(document.createTextNode(token));
-					}
+					frag.appendChild(this.buildEmojiImage(id));
+					replaced = true;
 					lastIndex = start + token.length;
 				}
 				if (!replaced) continue;
@@ -910,10 +2464,13 @@
 			this._dialogObserver = new MutationObserver(
 				Nyatten.util.debounce(tryInject, 80),
 			);
-			this._dialogObserver.observe(document.documentElement, {
-				childList: true,
-				subtree: true,
-			});
+			this._dialogObserver.observe(
+				document.body || document.documentElement,
+				{
+					childList: true,
+					subtree: true,
+				},
+			);
 
 			// 既に開いている場合に備えて一度実行
 			tryInject();
@@ -1461,6 +3018,77 @@
 		],
 	});
 
+	Nyatten.settingsGroups.push({
+		moduleId: 'file-preview-plus',
+		title: 'ファイルプレビュー+',
+		description: 'ファイルプレビュー機能を強化',
+		fields: [
+			{
+				key: 'image',
+				label: 'Image',
+				type: 'toggle',
+				description: '画像ファイルのプレビューを有効にします',
+			},
+			{
+				key: 'video',
+				label: 'Video',
+				type: 'toggle',
+				description: '動画ファイルのプレビューを有効にします',
+			},
+			{
+				key: 'audio',
+				label: 'Audio',
+				type: 'toggle',
+				description: '音声ファイルのプレビューを有効にします',
+			},
+			{
+				key: 'text',
+				label: 'Text',
+				type: 'toggle',
+				description: 'テキストファイルのプレビューを有効にします',
+			},
+			{
+				key: 'svg',
+				label: 'SVG',
+				type: 'toggle',
+				description: 'SVGファイルの安全なプレビューを有効にします',
+			},
+			{
+				key: 'md',
+				label: 'Markdown',
+				type: 'toggle',
+				description: 'Markdownファイルのプレビューを有効にします',
+			},
+			{
+				key: 'html',
+				label: 'HTML',
+				type: 'toggle',
+				description: 'HTMLファイルのプレビューを有効にします',
+			},
+			{
+				key: 'js',
+				label: 'JavaScript',
+				type: 'toggle',
+				description:
+					'JavaScriptファイルのソースコードプレビューを有効にします',
+			},
+			{
+				key: 'css',
+				label: 'CSS',
+				type: 'toggle',
+				description:
+					'CSSファイルのソースコードプレビューを有効にします',
+			},
+			{
+				key: 'sb3',
+				label: 'SB3',
+				type: 'toggle',
+				description:
+					'Scratch 3.0ファイル(.sb3)のプレビューを有効にします',
+			},
+		],
+	});
+
 	function cleanupNyattenPanel() {
 		lastNyattenRenderedRoute = null;
 		if (nyattenCardObserver) {
@@ -1614,17 +3242,43 @@
 			.catch(() => {});
 	}
 
+	function renderUpdateNotification(latestVersion) {
+		return (
+			'<div class="nyatten-update-banner rounded-2xl border border-border bg-card p-4 flex flex-col gap-2" style="border-color: var(--primary, #3b82f6); background: linear-gradient(135deg, var(--card, #fff) 0%, rgba(59, 130, 246, 0.05) 100%);">' +
+			'<div class="flex items-center gap-2">' +
+			'<span class="flex h-2.5 w-2.5 rounded-full bg-primary animate-pulse" style="background-color: var(--primary, #3b82f6);"></span>' +
+			'<h4 class="font-semibold text-sm text-foreground">新しいバージョンが利用可能です (v' +
+			latestVersion.replace(/^v/, '') +
+			')</h4>' +
+			'</div>' +
+			'<p class="text-xs text-muted-foreground">最新のリリースにアップデートして、新機能や修正を適用してください。</p>' +
+			'<div class="flex gap-3 mt-1">' +
+			'<a href="https://github.com/nyantorusabu/Nyatten/releases/latest" target="_blank" rel="noopener noreferrer" class="inline-flex items-center justify-center rounded-xl bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground shadow transition-all duration-200 hover:scale-105 active:scale-95" style="background-color: var(--primary, #3b82f6); color: var(--primary-foreground, #fff); text-decoration: none;">アップデートを確認</a>' +
+			'</div>' +
+			'</div>'
+		);
+	}
+
 	function renderNyattenIndex(panel, ctx) {
 		const query = (panel.getAttribute('data-nyatten-search') || '').trim();
 		const cardsContainer = panel.querySelector('[data-nyatten-cards]');
 
 		if (!cardsContainer) {
+			const updateCheckMod = getModuleById('update-check');
+			const updateBanner =
+				updateCheckMod &&
+				updateCheckMod.hasUpdate &&
+				updateCheckMod.latestVersion
+					? renderUpdateNotification(updateCheckMod.latestVersion)
+					: '';
+
 			panel.innerHTML =
 				renderPanelHeader('Nyatten') +
 				renderSearchBox(query) +
 				'<div class="rounded-2xl border border-border bg-card p-4">' +
 				`<p class="text-sm text-muted-foreground">Nyattenは非公式のサードパーティツールです。Nyattenの問題をAttenTeamに報告しないでください。</p>` +
 				'</div>' +
+				updateBanner +
 				'<div data-nyatten-cards class="flex flex-col gap-3"></div>';
 
 			panel.setAttribute('data-nyatten-back-to', '/settings');
@@ -2223,5 +3877,178 @@
 	/* ===========================================================================
 	 * 4. 起動
 	 * ========================================================================= */
+	Nyatten.registerModule({
+		id: 'update-check',
+		name: '更新確認',
+		description:
+			'Nyattenの新しいバージョンがリリースされているかを確認します',
+		defaultConfig: {
+			enabled: true,
+		},
+		latestVersion: null,
+		hasUpdate: false,
+		async init(ctx) {
+			ctx.log('更新確認 モジュール初期化');
+			const config = ctx.getConfig();
+			if (!config.enabled) return;
+
+			try {
+				const current =
+					chrome.runtime?.getManifest()?.version || '0.0.0';
+				ctx.log('現在のバージョン:', current);
+
+				const response = await fetch(
+					'https://api.github.com/repos/nyantorusabu/Nyatten/releases/latest',
+				);
+				if (!response.ok) {
+					throw new Error('HTTP error! status: ' + response.status);
+				}
+				const data = await response.json();
+				const latest = data.tag_name;
+				if (!latest) {
+					throw new Error('tag_name is missing in release response');
+				}
+
+				ctx.log('最新のバージョン (GitHub):', latest);
+
+				// バージョン比較
+				const parse = (v) => v.replace(/^v/, '').split('.').map(Number);
+				const currentParts = parse(current);
+				const latestParts = parse(latest);
+
+				if (currentParts.some(isNaN) || latestParts.some(isNaN)) {
+					throw new Error(
+						'Invalid version format: ' + current + ' vs ' + latest,
+					);
+				}
+
+				const [cMajor, cMinor, cPatch] = currentParts;
+				const [lMajor, lMinor, lPatch] = latestParts;
+
+				let isNew = false;
+				if (lMajor > cMajor) {
+					isNew = true;
+				} else if (lMajor === cMajor) {
+					if (lMinor > cMinor) {
+						isNew = true;
+					} else if (lMinor === cMinor) {
+						if (lPatch > cPatch) {
+							isNew = true;
+						}
+					}
+				}
+
+				if (isNew) {
+					ctx.log('新しいバージョンが検出されました:', latest);
+					this.latestVersion = latest;
+					this.hasUpdate = true;
+				}
+			} catch (e) {
+				ctx.nyatten.warn('更新確認に失敗しました:', e);
+			}
+		},
+	});
+
+	Nyatten.registerModule({
+		id: 'turbowarp-player-plus',
+		name: 'TurboWarpプレイヤー+',
+		description: 'ユーザー名を適応し自動でプロジェクトを実行する',
+		defaultConfig: {
+			enabled: true,
+		},
+		init(ctx) {
+			ctx.log('TurboWarpプレイヤー モジュール初期化');
+			this._ctx = ctx;
+			this._username = null;
+
+			// Fetch username in the background
+			this._fetchUsername();
+
+			// MutationObserver to watch for newly added iframes
+			this._observer = new MutationObserver((mutations) => {
+				let hasIframe = false;
+				for (const mutation of mutations) {
+					for (const node of mutation.addedNodes) {
+						if (node instanceof Element) {
+							if (node.tagName === 'IFRAME' || node.querySelector('iframe')) {
+								hasIframe = true;
+								break;
+							}
+						}
+					}
+					if (hasIframe) break;
+				}
+				if (hasIframe) {
+					this._replaceScratchPlayers();
+				}
+			});
+			this._observer.observe(document.body, {
+				childList: true,
+				subtree: true,
+			});
+
+			// Run replacement for existing iframes
+			this._replaceScratchPlayers();
+		},
+		onRouteChange(ctx) {
+			this._ctx = ctx;
+			this._replaceScratchPlayers();
+		},
+		async _fetchUsername() {
+			try {
+				const res = await chrome.runtime.sendMessage({
+					type: 'nyatten:get-scratch-session',
+				});
+				if (res && res.ok && res.username) {
+					this._username = res.username;
+					// Re-run replacement to inject username parameter
+					this._replaceScratchPlayers();
+				}
+			} catch (e) {
+				Nyatten.warn(
+					'[turbowarp-player] Failed to fetch Scratch username',
+					e,
+				);
+			}
+		},
+		_replaceScratchPlayers() {
+			const config = this._ctx?.getConfig() ?? {};
+			if (config.enabled === false) return;
+
+			const iframes = document.querySelectorAll(
+				'iframe[src*="scratch.mit.edu/projects/"], iframe[src*="turbowarp.org"]',
+			);
+			const currentUsernameKey = this._username || '';
+			for (const iframe of iframes) {
+				if (iframe.getAttribute('data-nyatten-turbowarp-processed') === currentUsernameKey) {
+					continue;
+				}
+				const src = iframe.src;
+				const match =
+					src.match(
+						/scratch\.mit\.edu\/projects\/(?:embed\/)?(\d+)/,
+					) ||
+					src.match(/scratch\.mit\.edu\/projects\/(\d+)/) ||
+					src.match(/turbowarp\.org\/(?:projects\/)?(\d+)/);
+				if (match) {
+					const projectId = match[1];
+					const params = new URLSearchParams({
+						autoplay: 'true',
+					});
+					if (this._username) {
+						params.set('username', this._username);
+					}
+					const expectedSrc = `https://turbowarp.org/projects/${projectId}/embed?${params.toString().replace('autoplay=true', 'autoplay')}`;
+					if (iframe.src !== expectedSrc) {
+						iframe.src = expectedSrc;
+					}
+					iframe.removeAttribute('width');
+					iframe.removeAttribute('height');
+					iframe.setAttribute('data-nyatten-turbowarp-processed', currentUsernameKey);
+				}
+			}
+		},
+	});
+
 	Nyatten.init();
 })();

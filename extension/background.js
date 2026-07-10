@@ -27,20 +27,43 @@ async function getScratchCsrfToken() {
   });
 }
 
+let cachedSession = null;
+let cachedSessionTime = 0;
+let activeSessionPromise = null;
+
 /** 既存のログイン済みセッションから、ログイン中のユーザー名だけを読み取る */
 async function getScratchSession() {
-  try {
-    const res = await fetch("https://scratch.mit.edu/session/", {
-      credentials: "include",
-      headers: { "X-Requested-With": "XMLHttpRequest" },
-    });
-    if (!res.ok) return { ok: false, username: null };
-    const data = await res.json();
-    const username = data?.user?.username ?? null;
-    return { ok: !!username, username };
-  } catch (e) {
-    return { ok: false, username: null };
+  const now = Date.now();
+  if (cachedSession && (now - cachedSessionTime < 10000)) {
+    return cachedSession;
   }
+
+  if (activeSessionPromise) {
+    return activeSessionPromise;
+  }
+
+  activeSessionPromise = (async () => {
+    try {
+      const res = await fetch("https://scratch.mit.edu/session/", {
+        credentials: "include",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+      });
+      if (!res.ok) return { ok: false, username: null };
+      const data = await res.json();
+      const username = data?.user?.username ?? null;
+      const result = { ok: !!username, username };
+      
+      cachedSession = result;
+      cachedSessionTime = Date.now();
+      return result;
+    } catch (e) {
+      return { ok: false, username: null };
+    } finally {
+      activeSessionPromise = null;
+    }
+  })();
+
+  return activeSessionPromise;
 }
 
 /**
