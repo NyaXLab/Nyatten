@@ -312,7 +312,6 @@
 				Nyatten.warn('localStorage への保存に失敗しました', e);
 			}
 		},
-
 	};
 
 	// グローバルに公開(モジュールファイルを別リソースとして分けた場合に参照できるように)
@@ -990,7 +989,7 @@
 			if (!isAlreadyLoggedIn) return;
 
 			button.disabled = true;
-			button.textContent = `ログイン済みのアカウント(${username})`;
+			button.textContent = `ログイン済みのアカウント(@${username})`;
 			button.classList.add(
 				'disabled:opacity-50',
 				'disabled:cursor-not-allowed',
@@ -1020,7 +1019,7 @@
 			button.setAttribute('data-nyatten-direct-login-button', '');
 			button.className =
 				'inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 rounded-full border whitespace-nowrap transition-colors outline-none min-h-11 px-5 py-2 h-11 w-full text-base font-semibold border-primary bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed';
-			button.textContent = `${username} でダイレクトログイン`;
+			button.textContent = `@${username} でダイレクトログイン`;
 			button.addEventListener('click', (e) => {
 				e.preventDefault();
 				e.stopPropagation();
