@@ -6,6 +6,12 @@ on:
             - main
         paths:
             - 'extension/manifest.json'
+    workflow_dispatch:
+        inputs:
+            force_release:
+                description: 'バージョン比較を無視して強制的にリリースする'
+                type: boolean
+                default: false
 
 permissions:
     contents: write
@@ -44,6 +50,12 @@ jobs:
                   NEW="${{ steps.manifest.outputs.version }}"
                   OLD="${{ steps.latest_release.outputs.latest_version }}"
 
+                  if [ "${{ github.event.inputs.force_release }}" = "true" ]; then
+                    echo "should_release=true" >> "$GITHUB_OUTPUT"
+                    echo "force_release が指定されたので強制的にリリースします。"
+                    exit 0
+                  fi
+
                   if [ -z "$OLD" ]; then
                     echo "should_release=true" >> "$GITHUB_OUTPUT"
                     echo "既存Releaseなし。リリースを実行します。"
@@ -75,7 +87,15 @@ jobs:
                   GH_TOKEN: ${{ github.token }}
               run: |
                   VERSION="${{ steps.manifest.outputs.version }}"
-                  gh release create "v${VERSION}" \
+                  TAG="v${VERSION}"
+
+                  # 同名タグ・Releaseが既にある場合は削除してから作り直す(force_release時など)
+                  if gh release view "$TAG" >/dev/null 2>&1; then
+                    echo "既存の $TAG を削除して作り直します。"
+                    gh release delete "$TAG" --yes --cleanup-tag
+                  fi
+
+                  gh release create "$TAG" \
                     "nyatten-v${VERSION}.zip" \
                     --title "V${VERSION}" \
                     --generate-notes
