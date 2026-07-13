@@ -2404,17 +2404,16 @@
 		return encoded;
 	}
 
-	function decodeStatus(displayName) {
-		if (!displayName || !displayName.startsWith(ACTIVE_START_MARKER)) {
-			return null;
-		}
-		if (displayName.charAt(1) === ACTIVE_PRIVATE_MARKER) {
+	function _parseTimestampAt(str, startIndex) {
+		// startIndex の位置が ACTIVE_START_MARKER であることを前提に解析する
+		if (str.charAt(startIndex) !== ACTIVE_START_MARKER) return null;
+		if (str.charAt(startIndex + 1) === ACTIVE_PRIVATE_MARKER) {
 			return { isPrivate: true };
 		}
 		let base3Str = '';
-		let i = 1;
-		while (i < displayName.length) {
-			const char = displayName.charAt(i);
+		let i = startIndex + 1;
+		while (i < str.length) {
+			const char = str.charAt(i);
 			if (ACTIVE_REV_MAP[char] !== undefined) {
 				base3Str += ACTIVE_REV_MAP[char];
 				i++;
@@ -2422,12 +2421,20 @@
 				break;
 			}
 		}
-		if (base3Str.length === 0) {
-			return null;
-		}
+		if (base3Str.length === 0) return null;
 		const minutes = parseInt(base3Str, 3);
 		const timestamp = minutes * 60000 + ACTIVE_EPOCH;
 		return { isPrivate: false, timestamp };
+	}
+
+	function decodeStatus(displayName) {
+		if (!displayName || !displayName.includes(ACTIVE_START_MARKER)) {
+			return null;
+		}
+		// タイムスタンプの開始位置は最初の ACTIVE_START_MARKER
+		// (エンコード内にも \u3164 が現れるため lastIndexOf は不可)
+		const idx = displayName.indexOf(ACTIVE_START_MARKER);
+		return _parseTimestampAt(displayName, idx);
 	}
 
 	function stripTimestamp(displayName) {
@@ -2631,7 +2638,7 @@
 			for (const input of inputs) {
 				if (
 					input.value &&
-					input.value.startsWith(ACTIVE_START_MARKER)
+					input.value.includes(ACTIVE_START_MARKER)
 				) {
 					input.value = stripTimestamp(input.value);
 				}
@@ -2727,8 +2734,8 @@
 				const currentDisplayName = activeEntry.user.display_name || '';
 
 				const cleanName = stripTimestamp(currentDisplayName);
-				const prefix = encodeTimestamp(config.privateStatus);
-				const newDisplayName = prefix + cleanName;
+				const suffix = encodeTimestamp(config.privateStatus);
+				const newDisplayName = cleanName + suffix;
 
 				if (newDisplayName !== currentDisplayName) {
 					this._ctx.log(
