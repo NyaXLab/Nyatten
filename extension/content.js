@@ -1929,45 +1929,55 @@
 		}
 		inputs.push(...Array.from(root.querySelectorAll('input[type="file"]')));
 
-		const FPP_EXTENSIONS = [
-			'.svg',
-			'.md',
-			'.markdown',
-			'.html',
-			'.htm',
-			'.js',
-			'.mjs',
-			'.cjs',
-			'.css',
-			'.sb3',
-			'.json',
-			'.xml',
-			'.py',
-		];
+		// 各設定キーがONのものだけを対象とする（OFFのプレビュー種別の拡張子は追加しない）
+		const FPP_EXTENSION_MAP = {
+			svg: ['.svg'],
+			md: ['.md', '.markdown'],
+			html: ['.html', '.htm'],
+			js: ['.js', '.mjs', '.cjs'],
+			css: ['.css'],
+			sb3: ['.sb3'],
+			json: ['.json'],
+			xml: ['.xml'],
+			py: ['.py'],
+		};
+
+		const FPP_EXTENSIONS = Object.entries(FPP_EXTENSION_MAP)
+			.filter(([key]) => config[key] !== false)
+			.flatMap(([, exts]) => exts);
+
+		if (FPP_EXTENSIONS.length === 0) return;
 
 		for (const input of inputs) {
 			const currentAccept = input.getAttribute('accept') || '';
+
+			// accept未指定（空）は「全ファイル許可」を意味するため何もしない
+			if (currentAccept.trim() === '') continue;
+
 			const currentTokens = currentAccept
 				.split(',')
-				.map((t) => t.trim().toLowerCase())
+				.map((t) => t.trim())
 				.filter(Boolean);
+			const currentTokensLower = currentTokens.map((t) => t.toLowerCase());
 
 			// アイコンアップロード等、画像専用のinputはスキップ
 			// accept属性がimage/*またはimage/...のみの場合はアイコン用とみなす
 			const hasImageOnly =
-				currentTokens.length > 0 &&
-				currentTokens.every(
+				currentTokensLower.length > 0 &&
+				currentTokensLower.every(
 					(t) => t === 'image/*' || t.startsWith('image/'),
 				);
 			if (hasImageOnly) continue;
 
 			const hasAll = FPP_EXTENSIONS.every((ext) =>
-				currentTokens.includes(ext),
+				currentTokensLower.includes(ext),
 			);
 			if (hasAll) continue;
 
+			// 既存のトークン（順序・大文字小文字とも）はそのまま残し、
+			// 不足している拡張子のみ追記する（上書きしない）
 			const toAdd = FPP_EXTENSIONS.filter(
-				(ext) => !currentTokens.includes(ext),
+				(ext) => !currentTokensLower.includes(ext),
 			);
 
 			if (toAdd.length > 0) {

@@ -1,7 +1,7 @@
 {
 	"manifest_version": 3,
 	"name": "Nyatten",
-	"version": "0.0.11",
+	"version": "0.0.12",
 	"description": "Nyattttttttttten",
 	"permissions": [
 		"storage",
