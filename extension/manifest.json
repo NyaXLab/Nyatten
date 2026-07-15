@@ -1,7 +1,7 @@
 {
 	"manifest_version": 3,
 	"name": "Nyatten",
-	"version": "0.0.12",
+	"version": "0.0.13",
 	"description": "Nyattttttttttten",
 	"permissions": [
 		"storage",
@@ -30,6 +30,15 @@
 		"48": "nyatten-48.png",
 		"128": "nyatten-128.png"
 	},
+	"web_accessible_resources": [
+		{
+			"resources": [
+				"vendor/emoji-mart/browser.js",
+				"vendor/emoji-mart/data.json"
+			],
+			"matches": ["https://atten.win/*", "https://*.atten.win/*"]
+		}
+	],
 	"content_scripts": [
 		{
 			"matches": ["https://atten.win/*"],
@@ -39,6 +48,12 @@
 		{
 			"matches": ["https://atten.win/*"],
 			"js": ["turnstileBridge.js"],
+			"world": "MAIN",
+			"run_at": "document_idle"
+		},
+		{
+			"matches": ["https://atten.win/*"],
+			"js": ["emojiMartBridge.js"],
 			"world": "MAIN",
 			"run_at": "document_idle"
 		},

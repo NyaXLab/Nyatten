@@ -1958,7 +1958,9 @@
 				.split(',')
 				.map((t) => t.trim())
 				.filter(Boolean);
-			const currentTokensLower = currentTokens.map((t) => t.toLowerCase());
+			const currentTokensLower = currentTokens.map((t) =>
+				t.toLowerCase(),
+			);
 
 			// アイコンアップロード等、画像専用のinputはスキップ
 			// accept属性がimage/*またはimage/...のみの場合はアイコン用とみなす
@@ -2646,10 +2648,7 @@
 				'input[type="text"], textarea',
 			);
 			for (const input of inputs) {
-				if (
-					input.value &&
-					input.value.includes(ACTIVE_START_MARKER)
-				) {
+				if (input.value && input.value.includes(ACTIVE_START_MARKER)) {
 					input.value = stripTimestamp(input.value);
 				}
 			}
@@ -3140,6 +3139,514 @@
 				textNode.replaceWith(frag);
 			}
 		},
+	});
+
+	/* ---------------------------------------------------------------------------
+	 * emoji-picker: ポスト作成欄/DM入力欄のファイル添付ボタンの横に絵文字ボタンを
+	 *   追加し、EmojiMart(https://github.com/missive/emoji-mart)のピッカーを開いて
+	 *   Unicode絵文字またはNyaXEmojiを挿入できるようにするモジュール。
+	 *
+	 *   注意（設計方針）:
+	 *   - Attenの投稿/DM入力欄はCodeMirror6ベースのエディタ(`.cm-content`が
+	 *     contenteditable)のため、Reactの内部stateを直接書き換えることはできない。
+	 *     `document.execCommand('insertText', ...)` を使い、CM6のDOM Observer /
+	 *     beforeinputハンドリング経由で自然な入力として反映させる。
+	 *   - EmojiMart本体はAtten側にバンドルされていないため、ビルド時に拡張機能へ
+	 *     同梱したUMDビルド(dist/browser.js)を読み込む(下記コメント参照)。
+	 *   - isolated worldから<script>を注入してもwindow.EmojiMartはページの
+	 *     MAIN world側windowに設定される(isolated worldとMAIN worldは
+	 *     document を共有するが window は別インスタンスのため)。そのため
+	 *     EmojiMartの読み込み・Pickerの生成はすべて emojiMartBridge.js
+	 *     (world: "MAIN" で登録された別のcontent script)に委譲し、
+	 *     document上のCustomEventでリクエスト/結果をやり取りする
+	 *     (turnstileBridge.jsと同じパターン)。
+	 *   - NyaXEmojiの絵文字一覧は nyax-emoji モジュールが取得済みのIDセットを
+	 *     再利用する(二重フェッチを避ける)。
+	 * ------------------------------------------------------------------------- */
+
+	// 注意: 拡張機能のCSP(script-src)はMV3では 'self' と wasm-unsafe-eval 等に
+	// 限定されており、外部CDN(cdn.jsdelivr.net等)から<script>を動的読み込みする
+	// ことはできない(実際にブロックされてConsoleエラーになる)。
+	// そのため EmojiMart本体とその絵文字データはビルド時に拡張機能へ同梱し、
+	// chrome.runtime.getURL() で拡張内リソースとして読み込む方式にしている。
+	//
+	// 同梱が必要なファイル(vendor/ディレクトリに配置しmanifest.jsonの
+	// web_accessible_resourcesに追加すること)。以下のCDN URLからそのまま
+	// ダウンロードして同名で配置すればよい:
+	//
+	//   vendor/emoji-mart/browser.js
+	//     https://cdn.jsdelivr.net/npm/emoji-mart@latest/dist/browser.js
+	//     (最新版で固定したい場合は @latest をバージョン番号に変更、
+	//      例: emoji-mart@5.6.0/dist/browser.js)
+	//
+	//   vendor/emoji-mart/data.json
+	//     https://cdn.jsdelivr.net/npm/@emoji-mart/data
+	//     (これはNode.js向けエントリなのでブラウザから直接取得すると
+	//      JSONではなくJSが返る場合がある。確実にJSONを取りたい場合は
+	//      https://cdn.jsdelivr.net/npm/@emoji-mart/data/sets/15/native.json
+	//      を使う。native=Unicode絵文字を使う場合はこちら、
+	//      Twemoji等の画像を使いたい場合は
+	//      https://cdn.jsdelivr.net/npm/@emoji-mart/data/sets/15/twitter.json)
+	//      どちらも {categories, emojis, aliases, sheet} 形式のJSONで、
+	//      EmojiMart.Picker の data オプションにそのまま渡せる。
+	//
+	// NyaXEmojiのカテゴリアイコン(nyax.svg)は元々ntnekochat.pages.dev上の
+	// リソースをそのまま参照しているため同梱不要。
+	//
+	// これらのURLは chrome.runtime.getURL() で生成した chrome-extension://
+	// スキームのURLになるが、実際に<script>やfetchを実行するのは
+	// emojiMartBridge.js (MAIN world)側なので、web_accessible_resourcesで
+	// ページオリジンからのアクセスを許可しておく必要がある。
+	const EMOJI_MART_SCRIPT_URL = chrome.runtime.getURL(
+		'vendor/emoji-mart/browser.js',
+	);
+	const EMOJI_MART_DATA_URL = chrome.runtime.getURL(
+		'vendor/emoji-mart/data.json',
+	);
+	const NYAX_CATEGORY_ICON_URL =
+		'https://ntnekochat.pages.dev/emoji/nyax.svg';
+
+	// 添付ボタンのaria-label/titleとして使われ得る文字列(日英)
+	const ATTACH_BUTTON_LABELS = [
+		'添付ファイル',
+		'添付',
+		'ファイルを追加',
+		'attach file',
+		'attachment',
+		'add file',
+	];
+
+	Nyatten.registerModule({
+		id: 'emoji-picker',
+		name: 'EmojiPicker',
+		description: 'EmojiPickerを追加します',
+		icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>',
+		defaultConfig: {
+			enabled: true,
+			showNyaxEmoji: true,
+		},
+		init(ctx) {
+			ctx.log('EmojiPicker モジュール初期化');
+			this._ctx = ctx;
+			this._popoverEl = null;
+			this._pickerHostEl = null;
+			this._closeHandler = null;
+			this._scanTimer = null;
+			this._observer = null;
+			this._currentRequestId = null;
+			this._boundOnPickerReady = null;
+			this._boundOnPickerError = null;
+			this._boundOnPickerSelect = null;
+
+			Nyatten.util.addStyle(
+				'.nyatten-emoji-btn { display: inline-flex; align-items: center; justify-content: center; }' +
+					'.nyatten-emoji-popover { position: fixed; z-index: 2147483000; box-shadow: 0 8px 30px rgba(0,0,0,.2); border-radius: 10px; overflow: hidden; }',
+			);
+
+			this._scheduleScan();
+
+			const root = document.body || document.documentElement;
+			this._observer = new MutationObserver(
+				Nyatten.util.debounce(() => this._scheduleScan(), 150),
+			);
+			this._observer.observe(root, { childList: true, subtree: true });
+
+			document.addEventListener(
+				'click',
+				(e) => {
+					const btn = e.target.closest('[data-nyatten-emoji-btn]');
+					if (!btn) return;
+					e.preventDefault();
+					e.stopPropagation();
+					this._togglePicker(btn);
+				},
+				true,
+			);
+
+			// モジュールが有効なら、起動段階でMAIN world側に先読みを
+			// リクエストしておき、初回クリック時の待ち時間を無くす。
+			const config = ctx.getConfig?.() ?? {};
+			if (config.enabled !== false) {
+				document.dispatchEvent(
+					new CustomEvent('nyatten:mw:emoji-preload-request', {
+						detail: { scriptUrl: EMOJI_MART_SCRIPT_URL },
+					}),
+				);
+			}
+		},
+		onRouteChange(ctx) {
+			this._ctx = ctx;
+			this._closePicker();
+			this._scheduleScan();
+		},
+
+		_scheduleScan() {
+			clearTimeout(this._scanTimer);
+			this._scanTimer = setTimeout(() => this._scan(), 150);
+		},
+
+		/** ページ内の添付ボタンを探し、その隣に絵文字ボタンを差し込む */
+		_scan() {
+			const config = this._ctx?.getConfig?.() ?? {};
+			if (config.enabled === false) return;
+
+			for (const attachBtn of this._findAttachButtons()) {
+				if (
+					attachBtn.parentElement?.querySelector(
+						':scope > [data-nyatten-emoji-btn]',
+					)
+				)
+					continue;
+				this._insertEmojiButton(attachBtn);
+			}
+		},
+
+		_findAttachButtons() {
+			const buttons = document.querySelectorAll(
+				'button[data-slot="icon-button"][aria-label], button[data-slot="icon-button"][title]',
+			);
+			const result = [];
+			for (const btn of buttons) {
+				if (btn.hasAttribute('data-nyatten-emoji-btn')) continue;
+				const label = (
+					btn.getAttribute('aria-label') ||
+					btn.getAttribute('title') ||
+					''
+				)
+					.trim()
+					.toLowerCase();
+				if (!label) continue;
+				if (
+					ATTACH_BUTTON_LABELS.some((l) => label === l.toLowerCase())
+				) {
+					result.push(btn);
+				}
+			}
+			return result;
+		},
+
+		/** 添付ボタンの直後に絵文字ボタンを挿入する */
+		_insertEmojiButton(attachBtn) {
+			const btn = attachBtn.cloneNode(true);
+			btn.removeAttribute('data-slot');
+			// アイコン部分をNyaXEmojiの smile 画像に差し替え
+			const iconImg = document.createElement('img');
+			iconImg.className = 'size-5';
+			iconImg.width = 20;
+			iconImg.height = 20;
+			iconImg.alt = '';
+			iconImg.src = this._nyaxEmojiImageUrl('smile');
+			btn.innerHTML = '';
+			btn.appendChild(iconImg);
+			btn.setAttribute('data-nyatten-emoji-btn', 'true');
+			btn.setAttribute('data-slot', 'icon-button');
+			btn.setAttribute('aria-label', '絵文字');
+			btn.setAttribute('title', '絵文字');
+			btn.removeAttribute('disabled');
+			attachBtn.insertAdjacentElement('afterend', btn);
+
+			// DM入力欄の添付ボタンは flex 配置ではなく
+			// `absolute bottom-2 left-2` のような絶対配置になっている
+			// (親要素基準の座標指定)。そのままクローンすると添付ボタンと
+			// 完全に同じ位置に重なってしまうため、絶対配置を検出した場合は
+			// 添付ボタンの実測幅ぶん右にオフセットして並べる。
+			const computedPosition = getComputedStyle(attachBtn).position;
+			if (
+				computedPosition === 'absolute' ||
+				computedPosition === 'fixed'
+			) {
+				const attachRect = attachBtn.getBoundingClientRect();
+				const gap = 4; // px、ボタン間の余白
+				btn.style.position = computedPosition;
+				btn.style.left =
+					attachBtn.offsetLeft + attachRect.width + gap + 'px';
+				btn.style.right = 'auto';
+				btn.style.top = attachBtn.offsetTop + 'px';
+				btn.style.bottom = 'auto';
+			}
+		},
+
+		/** 絵文字ボタンに対応するエディタ(.cm-content)を探す */
+		_findEditorFor(triggerBtn) {
+			const container =
+				triggerBtn.closest('[data-post-card-interactive]') ||
+				triggerBtn.closest('form') ||
+				triggerBtn.parentElement?.parentElement?.parentElement ||
+				document;
+			return (
+				container.querySelector?.('.cm-content') ||
+				document.querySelector('.cm-content')
+			);
+		},
+
+		/** エラーはユーザーには出さず、開発者向けconsoleログのみに留める */
+		_showError(message) {
+			Nyatten.warn(message);
+		},
+
+		/** nyax-emojiモジュールが保持しているNyaXEmoji IDリストを取得する */
+		_getNyaxEmojiIds() {
+			const mod = Nyatten._modules.find((m) => m.id === 'nyax-emoji');
+			if (!mod || !mod._emojiIds) return [];
+			return Array.from(mod._emojiIds);
+		},
+
+		_nyaxEmojiImageUrl(id) {
+			const mod = Nyatten._modules.find((m) => m.id === 'nyax-emoji');
+			const base =
+				mod?._emojiImageUrl || 'https://ntnekochat.pages.dev/emoji/';
+			return base + encodeURIComponent(id) + '.svg';
+		},
+
+		_buildNyaxCustomCategory() {
+			const ids = this._getNyaxEmojiIds();
+			if (!ids.length) return [];
+			return [
+				{
+					id: 'nyax',
+					name: 'NyaXEmoji',
+					emojis: ids.map((id) => ({
+						id: 'nyax_' + id,
+						name: id,
+						keywords: [id],
+						skins: [{ src: this._nyaxEmojiImageUrl(id) }],
+					})),
+				},
+			];
+		},
+
+		_resolveEmojiKey(emoji) {
+			if (
+				emoji &&
+				typeof emoji.id === 'string' &&
+				emoji.id.startsWith('nyax_')
+			) {
+				return 'nyax:' + emoji.id.slice(5);
+			}
+			if (emoji && typeof emoji.native === 'string') return emoji.native;
+			if (emoji && typeof emoji.unified === 'string') {
+				try {
+					return String.fromCodePoint(
+						...emoji.unified.split('-').map((h) => parseInt(h, 16)),
+					);
+				} catch (_) {
+					return null;
+				}
+			}
+			return null;
+		},
+
+		/** 選択された絵文字をエディタに挿入する(execCommandでCodeMirror6に自然入力として反映) */
+		_insertEmoji(editorEl, emojiKey) {
+			if (!editorEl) return;
+			const token = emojiKey.startsWith('nyax:')
+				? '_' + emojiKey.slice(5) + '_'
+				: emojiKey;
+			editorEl.focus();
+			try {
+				document.execCommand('insertText', false, token);
+			} catch (e) {
+				Nyatten.warn('絵文字の挿入に失敗しました', e);
+			}
+		},
+
+		_detachBridgeListeners() {
+			if (this._boundOnPickerReady) {
+				document.removeEventListener(
+					'nyatten:mw:emoji-picker-ready',
+					this._boundOnPickerReady,
+				);
+				this._boundOnPickerReady = null;
+			}
+			if (this._boundOnPickerError) {
+				document.removeEventListener(
+					'nyatten:mw:emoji-picker-error',
+					this._boundOnPickerError,
+				);
+				this._boundOnPickerError = null;
+			}
+			if (this._boundOnPickerSelect) {
+				document.removeEventListener(
+					'nyatten:mw:emoji-picker-select',
+					this._boundOnPickerSelect,
+				);
+				this._boundOnPickerSelect = null;
+			}
+		},
+
+		async _togglePicker(triggerBtn) {
+			if (this._popoverEl) {
+				this._closePicker();
+				return;
+			}
+
+			const editorEl = this._findEditorFor(triggerBtn);
+			if (!editorEl) {
+				this._showError('入力欄が見つかりませんでした。');
+				return;
+			}
+
+			const config = this._ctx?.getConfig?.() ?? {};
+			const showNyax = config.showNyaxEmoji !== false;
+
+			const requestId = `nyatten-emoji-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+			this._currentRequestId = requestId;
+
+			// Pickerの実体(EmojiMart.Picker)はMAIN world側で生成されるため、
+			// content.js側はホストとなるdivを用意し、セレクタで指定して渡す。
+			// MAIN world側はJS変数を共有できずセレクタでしかDOMを参照できない。
+			const hostId = `nyatten-emoji-host-${requestId}`;
+			const popover = document.createElement('div');
+			popover.className = 'nyatten-emoji-popover';
+			const host = document.createElement('div');
+			host.setAttribute('data-nyatten-emoji-host', hostId);
+			popover.appendChild(host);
+			document.body.appendChild(popover);
+			this._popoverEl = popover;
+			this._pickerHostEl = host;
+
+			const place = () => {
+				const rect = triggerBtn.getBoundingClientRect();
+				const pw = popover.offsetWidth || 340;
+				const ph = popover.offsetHeight || 420;
+				let left = rect.left;
+				if (left + pw > window.innerWidth - 8)
+					left = window.innerWidth - pw - 8;
+				if (left < 8) left = 8;
+				let top = rect.bottom + 6;
+				if (top + ph > window.innerHeight - 8) {
+					top = rect.top - ph - 6;
+				}
+				if (top < 8) top = 8;
+				popover.style.left = left + 'px';
+				popover.style.top = top + 'px';
+			};
+
+			this._detachBridgeListeners();
+
+			this._boundOnPickerReady = (e) => {
+				if (e.detail?.requestId !== requestId) return;
+				requestAnimationFrame(place);
+				setTimeout(place, 60);
+			};
+			this._boundOnPickerError = (e) => {
+				if (e.detail?.requestId !== requestId) return;
+				this._showError(
+					e.detail?.message || '絵文字ピッカーの表示に失敗しました。',
+				);
+				this._closePicker();
+			};
+			this._boundOnPickerSelect = (e) => {
+				if (e.detail?.requestId !== requestId) return;
+				const key = this._resolveEmojiKey(e.detail?.emoji);
+				if (key) this._insertEmoji(editorEl, key);
+				this._closePicker();
+			};
+			document.addEventListener(
+				'nyatten:mw:emoji-picker-ready',
+				this._boundOnPickerReady,
+			);
+			document.addEventListener(
+				'nyatten:mw:emoji-picker-error',
+				this._boundOnPickerError,
+			);
+			document.addEventListener(
+				'nyatten:mw:emoji-picker-select',
+				this._boundOnPickerSelect,
+			);
+
+			const options = {
+				theme: 'auto',
+				locale: 'ja',
+				previewEmoji: 'none',
+				skinTonePosition: 'search',
+				maxFrequentRows: 2,
+			};
+			if (showNyax) {
+				options.custom = this._buildNyaxCustomCategory();
+				options.categoryIcons = {
+					nyax: { src: NYAX_CATEGORY_ICON_URL },
+				};
+			}
+
+			document.dispatchEvent(
+				new CustomEvent('nyatten:mw:emoji-picker-open-request', {
+					detail: {
+						requestId,
+						scriptUrl: EMOJI_MART_SCRIPT_URL,
+						dataUrl: EMOJI_MART_DATA_URL,
+						hostSelector: `[data-nyatten-emoji-host="${hostId}"]`,
+						options,
+					},
+				}),
+			);
+
+			this._closeHandler = (e) => {
+				if (
+					this._popoverEl &&
+					!this._popoverEl.contains(e.target) &&
+					e.target !== triggerBtn
+				) {
+					this._closePicker();
+				}
+			};
+			setTimeout(() => {
+				document.addEventListener(
+					'mousedown',
+					this._closeHandler,
+					true,
+				);
+				document.addEventListener(
+					'touchstart',
+					this._closeHandler,
+					true,
+				);
+			}, 0);
+		},
+
+		_closePicker() {
+			if (this._currentRequestId) {
+				document.dispatchEvent(
+					new CustomEvent('nyatten:mw:emoji-picker-close-request', {
+						detail: { requestId: this._currentRequestId },
+					}),
+				);
+				this._currentRequestId = null;
+			}
+			this._detachBridgeListeners();
+			if (this._popoverEl) {
+				this._popoverEl.remove();
+				this._popoverEl = null;
+				this._pickerHostEl = null;
+			}
+			if (this._closeHandler) {
+				document.removeEventListener(
+					'mousedown',
+					this._closeHandler,
+					true,
+				);
+				document.removeEventListener(
+					'touchstart',
+					this._closeHandler,
+					true,
+				);
+				this._closeHandler = null;
+			}
+		},
+	});
+
+	Nyatten.settingsGroups.push({
+		moduleId: 'emoji-picker',
+		title: 'EmojiPicker',
+		description: 'EmojiPickerの設定',
+		fields: [
+			{
+				key: 'showNyaxEmoji',
+				label: 'NyaXEmojiタブを表示',
+				type: 'toggle',
+				description: 'EmojiPickerにNyaXEmojiタブを表示します',
+			},
+		],
 	});
 
 	/* ---------------------------------------------------------------------------
