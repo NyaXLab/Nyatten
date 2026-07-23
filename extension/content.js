@@ -5656,9 +5656,9 @@
         name: 'BetterUI',
         description: 'UI表示を細かく調整します',
         icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>',
-        defaultConfig: Object.fromEntries(
-            NYATTEN_BETTER_UI_ADJUSTMENTS.map((a) => [a.key, false]),
-        ),
+        defaultConfig: {enabled: false, ...Object.fromEntries(
+            NYATTEN_BETTER_UI_ADJUSTMENTS.map((a) => [a.key, false])
+        )},
         init(ctx) {
             ctx.log('BetterUI モジュール初期化');
             this._ctx = ctx;
