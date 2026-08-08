@@ -3302,8 +3302,13 @@
         },
 
         _findAttachButtons() {
+            // 以前は data-slot="icon-button" を持つ IconButton コンポーネントで
+            // 添付ボタンが描画されていたが、atten.win側のリファクタで
+            // 投稿フォーム・DM入力欄とも data-slot なしの通常の Button
+            // コンポーネントに変わった(2026年時点の実測)。
+            // data-slot の有無に依存せず、aria-label/title のみで判定する。
             const buttons = document.querySelectorAll(
-                'button[data-slot="icon-button"][aria-label], button[data-slot="icon-button"][title]',
+                'button[aria-label], button[title]',
             );
             const result = [];
             for (const btn of buttons) {
@@ -3329,13 +3334,38 @@
         _insertEmojiButton(attachBtn) {
             const btn = attachBtn.cloneNode(true);
             btn.removeAttribute('data-slot');
+
+            // アイコンサイズは固定20pxではなく、添付ボタン内の元アイコン
+            // (svg, `size-4`や`size-5`などTailwindクラスでサイズ指定)の
+            // 実測サイズをそのまま踏襲する。ボタン枠のサイズから比率で
+            // 逆算する方式だと、投稿フォーム(size-10/12ボタン)側で
+            // 想定より小さい値になり、アイコンだけ極端に小さく見える
+            // 問題が起きていたため、確実に同じ見た目になるよう
+            // 「元アイコン要素の実測px」を直接使う。
+            const originalIconEl = attachBtn.querySelector('svg, img');
+            const originalIconRect = originalIconEl
+                ? originalIconEl.getBoundingClientRect()
+                : null;
+            const iconSize =
+                originalIconRect && originalIconRect.width > 0
+                    ? Math.round(originalIconRect.width)
+                    : 20;
+
             // アイコン部分をNyaXEmojiの smile 画像に差し替え
             const iconImg = document.createElement('img');
-            iconImg.className = 'size-5';
-            iconImg.width = 20;
-            iconImg.height = 20;
+            iconImg.width = iconSize;
+            iconImg.height = iconSize;
+            iconImg.style.width = iconSize + 'px';
+            iconImg.style.height = iconSize + 'px';
             iconImg.alt = '';
             iconImg.src = this._nyaxEmojiImageUrl('smile');
+            iconImg.style.flexShrink = '0';
+            iconImg.style.flexGrow = '0';
+            iconImg.style.display = 'block';
+            iconImg.style.maxWidth = 'none';
+            iconImg.style.maxHeight = 'none';
+            iconImg.style.minWidth = iconSize + 'px';
+            iconImg.style.minHeight = iconSize + 'px';
             btn.innerHTML = '';
             btn.appendChild(iconImg);
             btn.setAttribute('data-nyatten-emoji-btn', 'true');
@@ -3343,6 +3373,15 @@
             btn.setAttribute('aria-label', '絵文字');
             btn.setAttribute('title', '絵文字');
             btn.removeAttribute('disabled');
+
+            // クリック判定を最優先で確保する。DM入力欄側はCodeMirror
+            // エディタや他の絶対配置要素と重なりやすく、z-indexを
+            // 明示しないと(通常のDOM順で後にあるエディタ側に)
+            // クリックを奪われてボタンが押せなくなることがあったため、
+            // ここで明示的に前面へ出す。
+            btn.style.zIndex = '30';
+            btn.style.pointerEvents = 'auto';
+
             attachBtn.insertAdjacentElement('afterend', btn);
 
             // DM入力欄の添付ボタンは flex 配置ではなく
@@ -3350,19 +3389,25 @@
             // (親要素基準の座標指定)。そのままクローンすると添付ボタンと
             // 完全に同じ位置に重なってしまうため、絶対配置を検出した場合は
             // 添付ボタンの実測幅ぶん右にオフセットして並べる。
+            // offsetLeft/offsetTop(offsetParent基準)とgetBoundingClientRect
+            // (ビューポート基準)を混在させると、offsetParentと実際の
+            // 配置基準がズレているケースで位置計算が狂うため、
+            // ここでは一貫してoffsetParent基準の値のみを使う。
             const computedPosition = getComputedStyle(attachBtn).position;
             if (
                 computedPosition === 'absolute' ||
                 computedPosition === 'fixed'
             ) {
-                const attachRect = attachBtn.getBoundingClientRect();
                 const gap = 4; // px、ボタン間の余白
+                const attachWidth =
+                    attachBtn.offsetWidth || 36;
                 btn.style.position = computedPosition;
-                btn.style.left =
-                    attachBtn.offsetLeft + attachRect.width + gap + 'px';
+                btn.style.left = attachBtn.offsetLeft + attachWidth + gap + 'px';
                 btn.style.right = 'auto';
                 btn.style.top = attachBtn.offsetTop + 'px';
                 btn.style.bottom = 'auto';
+                btn.style.width = attachWidth + 'px';
+                btn.style.height = (attachBtn.offsetHeight || 36) + 'px';
             }
         },
 
