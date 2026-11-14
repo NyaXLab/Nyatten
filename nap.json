@@ -1,0 +1,6 @@
+{
+  "name": "nyatten",
+  "include": [
+    "**"
+  ]
+}
