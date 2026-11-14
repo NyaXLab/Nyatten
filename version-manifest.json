@@ -1,0 +1,27 @@
+{
+  "files": {
+    ".gitattributes": "1a1dbe176bc233b499d35a57db7513f2941c99ab9759f177830c9149be99005b",
+    ".github/workflows/nap-publish.yml": "81b7c794806bd647206a0dee7fec0a851a0e59296a560b12664a1df726f44bad",
+    ".github/workflows/release-extension.yml": "e201f14c224b730dd60f59c03ddcb0bbde28638a1e881d463367ac60e21bd958",
+    ".gitignore": "a0c46c2e1b13356fad021a0325d3e03c0c72b60a51a37fcbd8ed51f2eb241d3c",
+    ".prettierignore": "97c52d02c954037f0817560e4049f1e4dd5dbe54b9905e4bb63b1652d98978b1",
+    ".prettierrc": "dbbc5ea4ca7cd8ab3078860c21375823dfc4f8f5fa806963b8c19c7d5d4982bc",
+    ".vscode/settings.json": "404f753deeba100218bf79bfd18de29acd068bd425b72586b20e114e9e35a5f2",
+    "LICENSE": "d45752f0e1dd91247e205dd3ddc9e22ba61d4c7e410656830e49c6c36ab0157e",
+    "README.md": "2653a573149809408650bd3d2b41b845619682008da0dd48c0ec5d5141f0a547",
+    "extension/background.js": "e5f4e0ec8e4354986d18f3bbdf6ccc6b4354997a64db335a4832ab0b9738bb90",
+    "extension/content.js": "c047a3a8dbdf495c13c51d81146334f78d1e70d12036037ad607eedd796c9d3b",
+    "extension/emojiMartBridge.js": "7b710b883839cfa1cb4e13a853c555fc016a5e5f47f907391b71e799fa96d245",
+    "extension/manifest.json": "081d214cb2edf5e346b33fed732aaea08212d5d74c53476c2e7c9b3166f0c124",
+    "extension/nyatten-128.png": "72ea68124c3e3a6099b0af30a8a1e536f31211c48475e8748c682bf431650403",
+    "extension/nyatten-16.png": "87f901ff5469f966df71adb25636ccb8a8aa7c1c252b53b1a0a5a14271e585d5",
+    "extension/nyatten-48.png": "8d4725933516d3e0921b52a3326658748e7fa9178e6fec0f8953d068f10b9a51",
+    "extension/rules.json": "6fb7b76ee5bfcf8b97008ecb4a732fe0dc28db82dc0593438c93781e3bd212be",
+    "extension/turbowarpBridge.js": "87cafea3670cab6de585dd1ace0735cf7f1bd977bbb8089a16476b5b40558a64",
+    "extension/turnstileBridge.js": "9fd4048c5517896f5b100cfd7440c698c4c335bcb4c571cc2cf37f241d5fd529",
+    "extension/vendor/emoji-mart/browser.js": "dd59b205b2ff0def13f50a622de004088ae64e958ae99ca6ff10630f1eb55d28",
+    "extension/vendor/emoji-mart/browser.js.map": "311ecbf31a174599524848a9b79c3365f06697752b6068b5787abdda5a554b97",
+    "extension/vendor/emoji-mart/data.json": "e1e7d657dba21af5904ffecf043f313852f5495833fc7bff6b1f0c5c4906d148"
+  },
+  "libraries": {}
+}
