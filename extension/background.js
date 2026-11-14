@@ -46,6 +46,10 @@ async function getScratchSession() {
         try {
             const res = await fetch('https://scratch.mit.edu/session/', {
                 credentials: 'include',
+                // ログイン前に読み込まれた未ログイン状態の応答がHTTPキャッシュに
+                // 残っていると、ログイン後も user が無いまま返ることがあるため
+                // キャッシュを使わず毎回サーバーへ取りに行く
+                cache: 'no-store',
                 headers: { 'X-Requested-With': 'XMLHttpRequest' },
             });
             if (!res.ok) return { ok: false, username: null };

@@ -2133,9 +2133,82 @@
         }
     }
 
+    /**
+     * 現在のAttenでは添付ファイルは投稿上のボタンからプレビューダイアログを
+     * 開く形式になっており、カード形式のダウンロードリンクは存在しない。
+     * ダイアログ内の files.atten.win へのリンクを起点に、ダイアログ内へ
+     * Nyattenのプレビューを差し込む。
+     */
+    async function processPreviewDialog(dialog, ctx) {
+        if (!(dialog instanceof Element)) return;
+        if (dialog.hasAttribute('data-nyatten-dialog-processed')) return;
+        if (dialog.querySelector('[data-nyatten-custom-preview]')) return;
+
+        const links = Array.from(
+            dialog.querySelectorAll('a[href*="files.atten.win"]'),
+        );
+        const link =
+            links.find(
+                (a) =>
+                    a.hasAttribute('download') ||
+                    (a.textContent || '').includes('ダウンロード'),
+            ) || links[0];
+        if (!link) return;
+        dialog.setAttribute('data-nyatten-dialog-processed', 'true');
+
+        const url = link.href;
+        if (!url) return;
+
+        // 画像はAtten標準のプレビューで足りるため対象外
+        // （Nyatten側はテキストやコードなど標準で見られない形式を担当する）
+        if (dialog.querySelector(`img[src="${url}"]`)) return;
+
+        // ファイル名はページ上に表示されないため、可能なら
+        // Content-Disposition から復元する（取れなければ拡張子なしで
+        // processCard 側のバイト列推定に任せる）
+        let filename = link.getAttribute('download') || '';
+        if (!filename) {
+            try {
+                const head = await fetch(url, { method: 'HEAD' });
+                const disposition = head.headers.get('Content-Disposition');
+                if (disposition) {
+                    const star = disposition.match(
+                        /filename\*=UTF-8''([^;]+)/i,
+                    );
+                    const plain = disposition.match(/filename="?([^";]+)"?/i);
+                    if (star) filename = decodeURIComponent(star[1]);
+                    else if (plain) filename = plain[1];
+                }
+            } catch (_) {}
+        }
+        if (!filename) filename = 'file';
+
+        // processCard はカード内の a[download] を起点にするため、
+        // ダイアログ内に受け口の要素を用意してそこを差し替えさせる
+        const host = document.createElement('div');
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.setAttribute('download', filename);
+        anchor.style.display = 'none';
+        host.appendChild(anchor);
+        dialog.appendChild(host);
+
+        processCard(host, ctx);
+    }
+
     function processNodes(root, ctx) {
         if (!(root instanceof Element)) return;
         modifyFileInputs(ctx, root);
+
+        // プレビューダイアログ形式の添付ファイルにも対応する
+        const dialogs = [];
+        if (root.matches('[role="dialog"]')) dialogs.push(root);
+        dialogs.push(
+            ...Array.from(root.querySelectorAll('[role="dialog"]')),
+        );
+        for (const dialog of dialogs) {
+            processPreviewDialog(dialog, ctx);
+        }
 
         // Fast-path: if the element is empty (no child elements) and doesn't match any target selectors,
         // it cannot contain or be a preview card, so we skip it immediately.
@@ -2681,9 +2754,7 @@
             if (method !== 'GET') headers['Content-Type'] = 'application/json';
             if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
 
-            const actingUserId = window.localStorage.getItem(
-                'atten.acting_user_id',
-            );
+            const actingUserId = await this._resolveActingUserId();
             if (actingUserId) {
                 headers['X-Acting-User-Id'] = actingUserId;
             }
@@ -2719,13 +2790,41 @@
             return this._request('PATCH', path, body);
         },
 
+        /**
+         * 操作中ユーザーIDの解決。localStorageを優先し、無ければ
+         * GET /session の acting_user から取得してキャッシュする。
+         * IDはAPI側で数値で返ることがあるため、常に文字列に正規化する。
+         */
+        async _resolveActingUserId() {
+            const stored = window.localStorage.getItem('atten.acting_user_id');
+            if (stored) return String(stored);
+            if (this._actingUserIdCache) return this._actingUserIdCache;
+            try {
+                const res = await fetch('https://api.atten.win/session', {
+                    credentials: 'include',
+                    headers: {
+                        Accept: 'application/json',
+                        'X-Client-Id': 'atten-web',
+                    },
+                });
+                const json = await res.json().catch(() => null);
+                const data = json?.data ?? json;
+                const id = data?.acting_user?.id ?? data?.acting_user_id;
+                if (id != null) {
+                    this._actingUserIdCache = String(id);
+                    return this._actingUserIdCache;
+                }
+            } catch (e) {
+                // 解決できない場合はヘッダ無しで続行する
+            }
+            return null;
+        },
+
         async _updateStatus() {
             const config = this._ctx.getConfig();
             if (!config.enabled) return;
 
-            const actingUserId = window.localStorage.getItem(
-                'atten.acting_user_id',
-            );
+            const actingUserId = await this._resolveActingUserId();
             if (!actingUserId) {
                 this._ctx.log('未ログインまたは操作アカウントがありません');
                 return;
@@ -2734,9 +2833,10 @@
             try {
                 const data = await this._apiGet('/session/users');
                 if (!Array.isArray(data)) return;
-                const activeEntry = data.find(
-                    (e) => e?.user?.id === actingUserId,
-                );
+                const activeEntry = data.find((e) => {
+                    const entryId = e?.user?.id ?? e?.user_id;
+                    return entryId != null && String(entryId) === actingUserId;
+                });
                 if (!activeEntry || !activeEntry.user) return;
 
                 const scratchName = activeEntry.user.scratch_name;
@@ -2911,13 +3011,34 @@
                 normalized.includes(word.toLowerCase()),
             );
         },
+        /**
+         * 非表示にする対象は投稿要素そのものに限定する。
+         * 親要素や、内側に別の投稿を含むコンテナ（タイムライン全体など）を
+         * 隠すと無関係な投稿まで巻き込んで消えるため、それらは対象外にする。
+         */
+        _hideTargetFor(el) {
+            if (!el || !(el instanceof Element)) return null;
+            const post =
+                el.closest("article, [role='article'], [data-post-card]") ||
+                el;
+            const nested = post.querySelectorAll(
+                "article, [role='article'], [data-post-card]",
+            );
+            if (nested.length > 0) return null;
+            return post;
+        },
         _hide(el) {
-            if (!el || !(el instanceof Element)) return;
-            (el.parentElement || el).style.display = 'none';
+            const target = this._hideTargetFor(el);
+            if (!target) return;
+            target.style.display = 'none';
+            target.setAttribute('data-nyatten-ngcat-hidden', 'true');
         },
         _show(el) {
-            if (!el || !(el instanceof Element)) return;
-            (el.parentElement || el).style.display = '';
+            const target = this._hideTargetFor(el);
+            if (!target) return;
+            if (!target.hasAttribute('data-nyatten-ngcat-hidden')) return;
+            target.style.display = '';
+            target.removeAttribute('data-nyatten-ngcat-hidden');
         },
         _scan(root) {
             if (!this._ctx?.getConfig?.()?.enabled) return;
@@ -2954,6 +3075,9 @@
 
             for (const el of targets) {
                 el.setAttribute('data-nyatten-ngcat-scanned', 'true');
+                // 内側に別の対象を含む要素はコンテナなので判定しない
+                // （タイムライン全体のテキストで誤判定して全投稿を隠さないため）
+                if (el.querySelector(selector)) continue;
                 const text = el.textContent || '';
                 if (this._containsNgWord(text)) {
                     this._hide(el);
@@ -3067,6 +3191,9 @@
                         'NyaXEmoji list の読み込みに失敗しました',
                         error,
                     );
+                    // 失敗をキャッシュすると再試行できず機能が死んだままになるため、
+                    // 次回（ルート遷移時など）に取り直せるようPromiseを解放する
+                    this._emojiListPromise = null;
                     return this._emojiIds;
                 });
             return this._emojiListPromise;
@@ -3086,6 +3213,9 @@
             const tagName = parent.tagName;
             if (this._ignoredSelectors.includes(tagName)) return false;
             if (parent.closest('[data-nyax-emoji]')) return false;
+            // 編集中の入力欄（投稿欄などのcontenteditable）の中は置換しない
+            if (parent.closest('[contenteditable="true"], .cm-content'))
+                return false;
             return true;
         },
         processEmojiReplacements(root) {
@@ -3411,17 +3541,21 @@
             }
         },
 
-        /** 絵文字ボタンに対応するエディタ(.cm-content)を探す */
+        /** 絵文字ボタンに対応するエディタを探す。
+         *  現在のAttenの投稿欄はCodeMirrorではなく通常の入力欄のため、
+         *  祖先を辿って最も近い入力欄を採用する（他所の入力欄を誤認しないよう
+         *  遡る深さには上限を設ける） */
         _findEditorFor(triggerBtn) {
-            const container =
-                triggerBtn.closest('[data-post-card-interactive]') ||
-                triggerBtn.closest('form') ||
-                triggerBtn.parentElement?.parentElement?.parentElement ||
-                document;
-            return (
-                container.querySelector?.('.cm-content') ||
-                document.querySelector('.cm-content')
-            );
+            const editorSelector =
+                '.cm-content, textarea, [contenteditable="true"], [role="textbox"]';
+            let node = triggerBtn;
+            for (let depth = 0; depth < 8 && node; depth++) {
+                node = node.parentElement;
+                if (!node) break;
+                const found = node.querySelector?.(editorSelector);
+                if (found) return found;
+            }
+            return document.querySelector('.cm-content');
         },
 
         /** エラーはユーザーには出さず、開発者向けconsoleログのみに留める */
@@ -3481,17 +3615,77 @@
             return null;
         },
 
-        /** 選択された絵文字をエディタに挿入する(execCommandでCodeMirror6に自然入力として反映) */
+        /** 選択された絵文字をエディタに挿入する。
+         *  まず execCommand で自然入力として反映を試み、効かない入力欄では
+         *  値の差し替え＋inputイベント発火でReact側の状態にも反映させる */
         _insertEmoji(editorEl, emojiKey) {
             if (!editorEl) return;
             const token = emojiKey.startsWith('nyax:')
                 ? '_' + emojiKey.slice(5) + '_'
                 : emojiKey;
             editorEl.focus();
+
+            let inserted = false;
             try {
-                document.execCommand('insertText', false, token);
+                inserted = document.execCommand('insertText', false, token);
             } catch (e) {
-                Nyatten.warn('絵文字の挿入に失敗しました', e);
+                inserted = false;
+            }
+            if (inserted) return;
+
+            if (
+                editorEl instanceof HTMLTextAreaElement ||
+                editorEl instanceof HTMLInputElement
+            ) {
+                const proto =
+                    editorEl instanceof HTMLTextAreaElement
+                        ? HTMLTextAreaElement.prototype
+                        : HTMLInputElement.prototype;
+                const setter = Object.getOwnPropertyDescriptor(
+                    proto,
+                    'value',
+                )?.set;
+                const start = editorEl.selectionStart ?? editorEl.value.length;
+                const end = editorEl.selectionEnd ?? editorEl.value.length;
+                const next =
+                    editorEl.value.slice(0, start) +
+                    token +
+                    editorEl.value.slice(end);
+                if (setter) setter.call(editorEl, next);
+                else editorEl.value = next;
+                editorEl.dispatchEvent(
+                    new InputEvent('input', {
+                        bubbles: true,
+                        inputType: 'insertText',
+                        data: token,
+                    }),
+                );
+                try {
+                    editorEl.setSelectionRange(
+                        start + token.length,
+                        start + token.length,
+                    );
+                } catch (_) {}
+                return;
+            }
+
+            const sel = window.getSelection();
+            if (sel && sel.rangeCount > 0) {
+                const range = sel.getRangeAt(0);
+                range.deleteContents();
+                const textNode = document.createTextNode(token);
+                range.insertNode(textNode);
+                range.setStartAfter(textNode);
+                range.collapse(true);
+                sel.removeAllRanges();
+                sel.addRange(range);
+                editorEl.dispatchEvent(
+                    new InputEvent('input', {
+                        bubbles: true,
+                        inputType: 'insertText',
+                        data: token,
+                    }),
+                );
             }
         },
 
@@ -3717,11 +3911,13 @@
                 const parsed = this._parseMirotalkUrl(link.href);
                 if (!parsed) return;
 
-                e.preventDefault();
-                e.stopPropagation();
-
+                // ユーザー情報が取れない場合は通常のリンク遷移を妨げない
+                // （先に preventDefault するとクリックが無反応になるため）
                 const userInfo = this._getUserInfo();
                 if (!userInfo) return;
+
+                e.preventDefault();
+                e.stopPropagation();
 
                 const params = new URLSearchParams({
                     room: parsed.roomId,
@@ -3742,7 +3938,11 @@
         _parseMirotalkUrl(url) {
             try {
                 const u = new URL(url);
-                if (!u.hostname.endsWith('mirotalk.com')) return null;
+                if (
+                    u.hostname !== 'mirotalk.com' &&
+                    !u.hostname.endsWith('.mirotalk.com')
+                )
+                    return null;
                 const room = u.searchParams.get('room');
                 if (room) return { roomId: room, host: u.hostname };
                 const parts = u.pathname
@@ -3851,9 +4051,12 @@
             }
         },
 
-        /** キャッシュ済みならそれを返し、無ければ確認する */
+        /** キャッシュ済みならそれを返し、無ければ確認する。
+         *  未ログイン(null)はキャッシュしない: 一時的な取得失敗や
+         *  Scratch側ログイン直後のタイミングで null が固定されると、
+         *  ページを再読み込みするまでボタンが二度と出なくなるため */
         async _getScratchSession(forceRefresh = false) {
-            if (!forceRefresh && this._scratchSession !== undefined) {
+            if (!forceRefresh && this._scratchSession) {
                 return this._scratchSession;
             }
             const session = await this._fetchScratchSession();
@@ -3898,22 +4101,39 @@
         _findAuthDialog() {
             const dialogs = document.querySelectorAll('[role="dialog"]');
             for (const dialog of dialogs) {
-                const heading = dialog.querySelector('h1, h2');
+                const heading = dialog.querySelector(
+                    'h1, h2, [role="heading"]',
+                );
                 const headingText = (heading?.textContent || '').trim();
                 if (headingText !== 'ログイン' && headingText !== 'Log in')
                     continue;
 
-                const usernameInput =
-                    dialog.querySelector('input[type="text"]');
-                if (!usernameInput) continue;
+                if (!this._getUsernameInput(dialog)) continue;
 
                 return dialog;
             }
             return null;
         },
 
+        /**
+         * Scratchユーザー名の入力欄を探す。
+         * type属性の付け方に依存しないよう、placeholderを最優先に判定し、
+         * 無ければテキスト系の最初の入力欄にフォールバックする。
+         */
         _getUsernameInput(dialog) {
-            return dialog.querySelector('input[type="text"]');
+            const inputs = Array.from(dialog.querySelectorAll('input'));
+            const byPlaceholder = inputs.find((input) =>
+                /scratch/i.test(input.placeholder || ''),
+            );
+            if (byPlaceholder) return byPlaceholder;
+            return (
+                inputs.find((input) => {
+                    const type = (
+                        input.getAttribute('type') || 'text'
+                    ).toLowerCase();
+                    return type === 'text' || type === 'search';
+                }) || null
+            );
         },
 
         async _injectDirectLoginButton(dialog) {
@@ -4007,7 +4227,43 @@
         },
 
         _appendToDialog(dialog, wrap) {
-            // 「プロフィールコメント認証」等の認証方式ボタンが並ぶブロックの直後に差し込む
+            // 「プロフィールコメント認証」等の認証方式ボタンが並ぶブロックの直後に差し込む。
+            // 入力欄の隣接要素に依存するとUI変更で差し込み位置を見失うため、
+            // 認証方式ボタンそのものを起点に、そのブロックの直後へ差し込む。
+            const methodButton = Array.from(
+                dialog.querySelectorAll('button'),
+            ).find((button) => {
+                const text = (button.textContent || '').trim();
+                return (
+                    text.includes('プロフィールコメント認証') ||
+                    text.toLowerCase().includes('profile comment')
+                );
+            });
+            if (methodButton) {
+                let block = methodButton;
+                while (
+                    block.parentElement &&
+                    block.parentElement !== dialog &&
+                    !block.parentElement.matches('[role="dialog"]')
+                ) {
+                    block = block.parentElement;
+                    // ダイアログ直下の子まで登ったら、そのブロックの直後が差し込み位置
+                    if (block.parentElement === dialog) break;
+                    if (
+                        block.parentElement &&
+                        block.parentElement.parentElement === dialog
+                    )
+                        break;
+                }
+                if (block.parentElement) {
+                    block.parentElement.insertBefore(
+                        wrap,
+                        block.nextSibling,
+                    );
+                    return;
+                }
+            }
+
             const usernameInput = this._getUsernameInput(dialog);
             const authButtonsBlock =
                 usernameInput?.closest('div')?.nextElementSibling;
@@ -4551,9 +4807,7 @@
             nyattenCardObserver = null;
         }
 
-        const container = document.querySelector(
-            'div.mx-auto.w-full.max-w-225, div.mx-auto.w-full[data-nyatten-betterui-maxw]',
-        );
+        const container = findSettingsPageContainer();
         if (!container) return;
 
         const panel = container.querySelector('[data-nyatten-settings-panel]');
@@ -4569,8 +4823,48 @@
         });
     }
 
+    /**
+     * /settings の項目一覧のコンテナを探す。
+     * 現在のAttenは /settings がサブルートへのリンク一覧ページになっており
+     * section要素は存在しないため、項目リンクから共通の親を辿って特定する。
+     */
+    function findSettingsListContainer() {
+        const anchor = document.querySelector('a[href$="/settings/account"]');
+        if (!anchor) return null;
+        let el = anchor.parentElement;
+        while (el && el !== document.body) {
+            if (el.querySelector('a[href$="/settings/privacy"]')) return el;
+            el = el.parentElement;
+        }
+        return anchor.parentElement;
+    }
+
     function findSettingsCardContainer() {
-        return document.querySelector('section.flex.flex-col.gap-3.px-4.py-6');
+        return (
+            document.querySelector('section.flex.flex-col.gap-3.px-4.py-6') ||
+            findSettingsListContainer()
+        );
+    }
+
+    /** 設定ページ全体（見出し＋一覧）の差し替え先コンテナを探す */
+    function findSettingsPageContainer() {
+        const legacy = document.querySelector(
+            'div.mx-auto.w-full.max-w-225, div.mx-auto.w-full[data-nyatten-betterui-maxw]',
+        );
+        if (legacy) return legacy;
+
+        const list = findSettingsListContainer();
+        if (!list) return null;
+
+        // 見出しを含む列まで最大3階層だけ遡る（差し替え範囲を見出し込みにするため）
+        let el = list;
+        for (let i = 0; i < 3 && el.parentElement; i++) {
+            const parent = el.parentElement;
+            if (parent.tagName === 'MAIN' || parent === document.body) break;
+            if (!parent.querySelector('h1, h2')) break;
+            el = parent;
+        }
+        return el;
     }
 
     // injectNyattenCard は /settings ルート専用。非同期解決や
@@ -4583,9 +4877,13 @@
 
     function injectNyattenCard(ctx) {
         Nyatten.util
-            .waitForElement('section.flex.flex-col.gap-3.px-4.py-6')
-            .then((container) => {
+            .waitForElement(
+                'section.flex.flex-col.gap-3.px-4.py-6, a[href$="/settings/account"]',
+            )
+            .then(() => {
                 if (!isOnNyattenCardRoute()) return;
+                const container = findSettingsCardContainer();
+                if (!container) return;
                 if (container.querySelector('[data-nyatten-settings-card]'))
                     return;
 
@@ -4659,9 +4957,11 @@
 
         Nyatten.util
             .waitForElement(
-                'div.mx-auto.w-full.max-w-225, div.mx-auto.w-full[data-nyatten-betterui-maxw]',
+                'div.mx-auto.w-full.max-w-225, div.mx-auto.w-full[data-nyatten-betterui-maxw], a[href$="/settings/account"]',
             )
-            .then((container) => {
+            .then(() => {
+                const container = findSettingsPageContainer();
+                if (!container) return;
                 if (container.querySelector('[data-nyatten-settings-panel]'))
                     return;
 
